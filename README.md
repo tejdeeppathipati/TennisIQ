@@ -30,8 +30,12 @@ TennisIQ/
     datasets/
       balltracking/
         images/
-        labels/
         splits/
+          train.txt
+          val.txt
+          test.txt
+        labels_train.csv
+        labels_val.csv
       court_identification/
         images/
         keypoints/
@@ -114,6 +118,13 @@ Court:
 python3 -m tennisiq.cv.court.train \
   --data-root data/datasets/court_identification
 ```
+
+## Dataset Splits
+
+For showcase/testing, clip-level split files are included at:
+- `data/datasets/balltracking/splits/train.txt`
+- `data/datasets/balltracking/splits/val.txt`
+- `data/datasets/balltracking/splits/test.txt`
 
 ## UI
 

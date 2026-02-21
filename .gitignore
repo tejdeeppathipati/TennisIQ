@@ -25,5 +25,9 @@ outputs/**
 # Data artifacts (keep structure, ignore heavy contents)
 data/datasets/**
 data/raw/**
+!data/datasets/
+!data/datasets/balltracking/
+!data/datasets/balltracking/splits/
+!data/datasets/balltracking/splits/*.txt
 !data/annotations/
 !data/annotations/.gitkeep

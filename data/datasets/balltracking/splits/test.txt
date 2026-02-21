@@ -1,0 +1,14 @@
+images/game1/Clip1
+images/game1/Clip10
+images/game10/Clip4
+images/game10/Clip5
+images/game10/Clip6
+images/game3/Clip7
+images/game3/Clip8
+images/game3/Clip9
+images/game5/Clip5
+images/game5/Clip6
+images/game5/Clip7
+images/game8/Clip3
+images/game8/Clip4
+images/game8/Clip5
