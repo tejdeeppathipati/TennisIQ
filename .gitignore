@@ -1,0 +1,29 @@
+__pycache__/
+*.py[cod]
+*.so
+.DS_Store
+.env
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Build / logs
+build/
+dist/
+*.log
+
+# Artifacts
+checkpoints/**
+!checkpoints/
+!checkpoints/ball/
+!checkpoints/court/
+!checkpoints/ball/best.pt
+!checkpoints/court/best.pt
+outputs/**
+
+# Data artifacts (keep structure, ignore heavy contents)
+data/datasets/**
+data/raw/**
+!data/annotations/
+!data/annotations/.gitkeep
