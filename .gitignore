@@ -31,3 +31,6 @@ data/raw/**
 !data/datasets/balltracking/splits/*.txt
 !data/annotations/
 !data/annotations/.gitkeep
+
+# Evaluation outputs
+eval/predictions/**

@@ -1,0 +1,13 @@
+{
+  "bounce": {
+    "precision": 0.0,
+    "recall": 0.0,
+    "f1": 0.0
+  },
+  "point_segmentation": {
+    "end_reason_accuracy": 0.0
+  },
+  "inout": {
+    "bounce_inout_accuracy": 0.0
+  }
+}

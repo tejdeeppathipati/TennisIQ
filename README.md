@@ -103,12 +103,23 @@ python3 -m tennisiq.pipeline.run_all \
   --court-model checkpoints/court/best.pt \
   --ball-model checkpoints/ball/best.pt \
   --player-model yolov8n.pt \
+  --event-model-path /path/to/event_model.cbm \
+  --event-threshold 0.5 \
+  --line-margin-px 12 \
+  --serve-speed-thresh 600 \
+  --inactivity-frames 24 \
+  --ball-lost-frames 12 \
   --output outputs/runs/$(date +%Y-%m-%d_%H%M)
 ```
 
 Player model notes:
 - If `yolov8n.pt` exists locally, it will be used.
 - To allow auto-download via Ultralytics, add `--allow-player-model-download`.
+
+Outputs include:
+- `frames.jsonl`, `tracks.json`, `points.json`, `insights.json`
+- `overlay.mp4`
+- `clips/point_XXXX.mp4`
 
 ## Train Models
 
@@ -135,6 +146,29 @@ For showcase/testing, clip-level split files are included at:
 
 ```bash
 streamlit run ui/streamlit_app.py
+```
+
+## Evaluation Harness
+
+Create annotation template from a run:
+```bash
+python3 scripts/make_annotation_template.py \
+  --run-dir outputs/runs/<run_id> \
+  --output eval/annotations/match_01.jsonl
+```
+
+Validate annotations:
+```bash
+python3 scripts/review_annotations.py \
+  --annotations eval/annotations/match_01.jsonl
+```
+
+Evaluate and apply regression gates:
+```bash
+bash scripts/eval_run.sh \
+  outputs/runs/<run_id> \
+  eval/annotations/match_01.jsonl \
+  eval/baseline_metrics.json
 ```
 
 ## Notes
