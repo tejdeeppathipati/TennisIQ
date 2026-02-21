@@ -40,7 +40,7 @@ def parse_args():
     parser.add_argument("--inactivity-frames", type=int, default=24)
     parser.add_argument("--ball-lost-frames", type=int, default=12)
 
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     return parser.parse_args()
 
 

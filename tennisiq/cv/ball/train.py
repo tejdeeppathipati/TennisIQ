@@ -110,7 +110,7 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1.0)
     parser.add_argument("--val-intervals", type=int, default=5)
     parser.add_argument("--steps-per-epoch", type=int, default=200)
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     return parser.parse_args()
 
 

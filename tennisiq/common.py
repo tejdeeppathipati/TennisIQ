@@ -28,4 +28,16 @@ def get_device(preferred: str = "auto") -> str:
         return "cpu"
     if preferred == "cuda":
         return "cuda" if torch.cuda.is_available() else "cpu"
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if preferred == "mps":
+        mps_backend = getattr(torch.backends, "mps", None)
+        if mps_backend is not None and torch.backends.mps.is_available():
+            return "mps"
+        return "cpu"
+
+    # auto priority: CUDA -> MPS -> CPU
+    if torch.cuda.is_available():
+        return "cuda"
+    mps_backend = getattr(torch.backends, "mps", None)
+    if mps_backend is not None and torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"

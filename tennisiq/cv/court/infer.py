@@ -59,7 +59,7 @@ def parse_args():
     parser.add_argument("--output-path", type=str, required=True)
     parser.add_argument("--use-refine-kps", action="store_true")
     parser.add_argument("--use-homography", action="store_true")
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     return parser.parse_args()
 
 

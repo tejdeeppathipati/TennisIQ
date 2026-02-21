@@ -148,7 +148,7 @@ def parse_args():
     parser.add_argument("--video-out-path", type=str, required=True)
     parser.add_argument("--normalize-fps", type=int, default=0, help="If > 0, preprocess input video with MoviePy to this FPS.")
     parser.add_argument("--extrapolation", action="store_true")
-    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     return parser.parse_args()
 
 
