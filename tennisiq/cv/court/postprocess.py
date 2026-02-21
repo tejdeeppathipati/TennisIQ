@@ -10,7 +10,11 @@ from tennisiq.cv.court.utils import line_intersection
 
 
 def postprocess(heatmap: np.ndarray, scale: int = 2, low_thresh: int = 155, min_radius: int = 10, max_radius: int = 30):
-    x_pred, y_pred = None, None
+    peak_y, peak_x = np.unravel_index(int(np.argmax(heatmap)), heatmap.shape)
+    peak_value = int(heatmap[peak_y, peak_x])
+    if peak_value < low_thresh:
+        return None, None
+
     _, heatmap_bin = cv2.threshold(heatmap, low_thresh, 255, cv2.THRESH_BINARY)
     circles = cv2.HoughCircles(
         heatmap_bin,
@@ -22,10 +26,15 @@ def postprocess(heatmap: np.ndarray, scale: int = 2, low_thresh: int = 155, min_
         minRadius=min_radius,
         maxRadius=max_radius,
     )
-    if circles is not None:
-        x_pred = float(circles[0][0][0] * scale)
-        y_pred = float(circles[0][0][1] * scale)
-    return x_pred, y_pred
+    if circles is None:
+        return float(peak_x * scale), float(peak_y * scale)
+
+    circles = circles[0]
+    if len(circles) == 0:
+        return float(peak_x * scale), float(peak_y * scale)
+
+    best = min(circles, key=lambda c: (c[0] - peak_x) ** 2 + (c[1] - peak_y) ** 2)
+    return float(best[0] * scale), float(best[1] * scale)
 
 
 def detect_lines(image: np.ndarray) -> List[np.ndarray]:
