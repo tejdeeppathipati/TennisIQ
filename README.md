@@ -1,4 +1,4 @@
-# CourtSense 🏀
+# CourtSense 
 
 Tennis vision intelligence for college coaches.
 Paste a YouTube link. Get a trained detector, annotated footage, highlight clips, and heatmaps — in under 30 minutes.
