@@ -102,8 +102,13 @@ python3 -m tennisiq.pipeline.run_all \
   --video data/raw/input.mp4 \
   --court-model checkpoints/court/best.pt \
   --ball-model checkpoints/ball/best.pt \
+  --player-model yolov8n.pt \
   --output outputs/runs/$(date +%Y-%m-%d_%H%M)
 ```
+
+Player model notes:
+- If `yolov8n.pt` exists locally, it will be used.
+- To allow auto-download via Ultralytics, add `--allow-player-model-download`.
 
 ## Train Models
 

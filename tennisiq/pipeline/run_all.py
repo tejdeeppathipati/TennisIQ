@@ -5,10 +5,6 @@ from pathlib import Path
 
 import cv2
 
-from tennisiq.analytics.insights import summarize_insights
-from tennisiq.analytics.stats import basic_match_stats
-from tennisiq.events.bounces import detect_bounces
-from tennisiq.events.hits import detect_hits
 from tennisiq.io.export import export_json, export_jsonl
 from tennisiq.io.video import read_video, write_video
 from tennisiq.pipeline.step_01_court import run_step_01_court
@@ -25,8 +21,42 @@ def parse_args():
     parser.add_argument("--court-model", type=str, required=True)
     parser.add_argument("--ball-model", type=str, required=True)
     parser.add_argument("--output", type=str, required=True)
+
+    parser.add_argument("--player-model", type=str, default="yolov8n.pt")
+    parser.add_argument("--player-conf", type=float, default=0.2)
+    parser.add_argument("--player-iou", type=float, default=0.5)
+    parser.add_argument("--player-tracker", type=str, default="bytetrack.yaml")
+    parser.add_argument("--no-player-fallback", action="store_true")
+    parser.add_argument("--allow-player-model-download", action="store_true")
+
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda"])
     return parser.parse_args()
+
+
+def _draw_overlay(frame, row):
+    out = frame.copy()
+
+    # Court keypoints
+    for pt in row.get("court_keypoints", []):
+        if pt[0] is None or pt[1] is None:
+            continue
+        out = cv2.circle(out, (int(pt[0]), int(pt[1])), radius=0, color=(255, 255, 0), thickness=5)
+
+    # Ball
+    bx, by = row.get("ball_xy", (None, None))
+    if bx is not None and by is not None:
+        color = (0, 255, 0) if row.get("ball_inout") == "in" else (0, 0, 255)
+        out = cv2.circle(out, (int(bx), int(by)), radius=0, color=color, thickness=8)
+
+    # Players
+    for name, color in [("playerA_bbox", (255, 0, 0)), ("playerB_bbox", (0, 165, 255))]:
+        bbox = row.get(name)
+        if bbox is None:
+            continue
+        x1, y1, x2, y2 = [int(v) for v in bbox]
+        out = cv2.rectangle(out, (x1, y1), (x2, y2), color, 2)
+
+    return out
 
 
 def main():
@@ -38,34 +68,31 @@ def main():
 
     court_points = run_step_01_court(frames, args.court_model, device=args.device)
     ball_track = run_step_02_ball(frames, args.ball_model, extrapolation=True, device=args.device)
-    _players = run_step_03_players(frames)
+    players = run_step_03_players(
+        frames,
+        model_path=args.player_model,
+        conf=args.player_conf,
+        iou=args.player_iou,
+        tracker=args.player_tracker,
+        fallback_hog=not args.no_player_fallback,
+        allow_model_download=args.allow_player_model_download,
+    )
 
-    records = run_step_04_join_frames(court_points, ball_track)
-    record_dicts = [r.to_dict() for r in records]
-    enriched = run_step_05_map_and_points(record_dicts)
+    records = run_step_04_join_frames(court_points, ball_track, players, fps=fps)
+    mapped = run_step_05_map_and_points(records, fps=fps)
 
-    clips_dir = run_step_06_export_clips(str(output_dir))
+    mapped_frames = mapped["frames"]
+    overlay_frames = [_draw_overlay(frame, mapped_frames[idx]) for idx, frame in enumerate(frames[: len(mapped_frames)])]
 
-    # Overlay ball track for quick visual inspection.
-    overlay_frames = []
-    for idx, frame in enumerate(frames):
-        out = frame.copy()
-        if idx < len(ball_track):
-            x, y = ball_track[idx]
-            if x is not None and y is not None:
-                out = cv2.circle(out, (int(x), int(y)), radius=0, color=(0, 0, 255), thickness=8)
-        overlay_frames.append(out)
+    clips_dir, clip_meta = run_step_06_export_clips(str(output_dir), overlay_frames, mapped["points"], fps=fps)
 
-    export_jsonl(str(output_dir / "frames.jsonl"), enriched)
-    export_json(str(output_dir / "tracks.json"), {"ball_track": ball_track})
-    export_json(str(output_dir / "points.json"), {"court_points": court_points})
-    export_json(str(output_dir / "meta.json"), {"clips_dir": clips_dir, "fps": fps})
-    write_video(overlay_frames, fps, str(output_dir / "overlay.mp4"))
+    export_jsonl(str(output_dir / "frames.jsonl"), mapped_frames)
+    export_json(str(output_dir / "tracks.json"), mapped["tracks"])
+    export_json(str(output_dir / "points.json"), {"points": mapped["points"], "clips": clip_meta})
+    export_json(str(output_dir / "insights.json"), {"stats": mapped["stats"], "insights": mapped["insights"], "visuals": mapped["visuals"]})
+    export_json(str(output_dir / "meta.json"), {"fps": fps, "num_frames": len(mapped_frames), "clips_dir": clips_dir})
 
-    bounces = detect_bounces(ball_track)
-    hits = detect_hits(ball_track)
-    stats = basic_match_stats(len(bounces), len(hits), len(frames))
-    export_json(str(output_dir / "insights.json"), {"stats": stats, "summary": summarize_insights(stats)})
+    write_video(overlay_frames, fps, str(output_dir / "overlay.mp4"), codec="mp4v")
 
 
 if __name__ == "__main__":
