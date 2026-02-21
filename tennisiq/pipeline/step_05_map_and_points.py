@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 from tennisiq.events.bounces import detect_bounce_candidates, score_bounce_candidates
 from tennisiq.events.features import compute_track_kinematics
@@ -165,7 +166,7 @@ def run_step_05_map_and_points(
 
     homography_series = []
 
-    for i, fr in enumerate(frame_records):
+    for i, fr in enumerate(tqdm(frame_records, desc="Step 5/6 Mapping + events", unit="frame")):
         row = fr.to_dict()
         kps = [tuple(p) for p in row["court_keypoints"]]
 

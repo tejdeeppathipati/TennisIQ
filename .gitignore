@@ -34,3 +34,9 @@ data/raw/**
 
 # Evaluation outputs
 eval/predictions/**
+
+# Local testing assets
+input.mp4
+testai.mp4
+yolov8n.pt
+third_party/

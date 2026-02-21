@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
+from tqdm import tqdm
+
 from tennisiq.io.video import write_video
 
 
@@ -21,7 +23,7 @@ def run_step_06_export_clips(
     post_frames = int(post_sec * fps)
 
     clip_meta = []
-    for p in points:
+    for p in tqdm(points, desc="Step 6/6 Export clips", unit="clip"):
         start = max(0, p["start_frame"] - pre_frames)
         end = min(len(frames) - 1, p["end_frame"] + post_frames)
         clip_frames = frames[start : end + 1]
