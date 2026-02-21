@@ -100,6 +100,7 @@ Current training scripts also write `last.pt` under the same folders.
 ```bash
 python3 -m tennisiq.pipeline.run_all \
   --video data/raw/input.mp4 \
+  --normalize-fps 30 \
   --court-model checkpoints/court/best.pt \
   --ball-model checkpoints/ball/best.pt \
   --player-model yolov8n.pt \
@@ -115,6 +116,7 @@ python3 -m tennisiq.pipeline.run_all \
 Player model notes:
 - If `yolov8n.pt` exists locally, it will be used.
 - To allow auto-download via Ultralytics, add `--allow-player-model-download`.
+- If source videos vary in FPS/encoding, use `--normalize-fps 30` for consistent behavior.
 
 Outputs include:
 - `frames.jsonl`, `tracks.json`, `points.json`, `insights.json`

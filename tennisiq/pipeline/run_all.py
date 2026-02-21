@@ -6,7 +6,7 @@ from pathlib import Path
 import cv2
 
 from tennisiq.io.export import export_json, export_jsonl
-from tennisiq.io.video import read_video, write_video
+from tennisiq.io.video import normalize_video_fps_moviepy, read_video, write_video
 from tennisiq.pipeline.step_01_court import run_step_01_court
 from tennisiq.pipeline.step_02_ball import run_step_02_ball
 from tennisiq.pipeline.step_03_players import run_step_03_players
@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument("--court-model", type=str, required=True)
     parser.add_argument("--ball-model", type=str, required=True)
     parser.add_argument("--output", type=str, required=True)
+    parser.add_argument("--normalize-fps", type=int, default=0, help="If > 0, preprocess input video with MoviePy to this FPS.")
 
     parser.add_argument("--player-model", type=str, default="yolov8n.pt")
     parser.add_argument("--player-conf", type=float, default=0.2)
@@ -79,7 +80,12 @@ def main():
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    frames, fps = read_video(args.video)
+    video_path = args.video
+    if args.normalize_fps > 0:
+        normalized_input = output_dir / f"input_{args.normalize_fps}fps.mp4"
+        video_path = normalize_video_fps_moviepy(args.video, str(normalized_input), target_fps=args.normalize_fps)
+
+    frames, fps = read_video(video_path)
 
     court_points = run_step_01_court(frames, args.court_model, device=args.device)
     ball_track = run_step_02_ball(frames, args.ball_model, extrapolation=True, device=args.device)
