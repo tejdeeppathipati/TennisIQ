@@ -317,11 +317,14 @@ def _detect_players_with_artlabss_frcnn(
 
 def _detect_players_with_ultralytics(
     frames: List[np.ndarray],
+    court_points: Sequence[Sequence[tuple[float | None, float | None]]] | None = None,
     model_path: str = "yolov8n.pt",
     conf: float = 0.2,
     iou: float = 0.5,
     tracker: str = "bytetrack.yaml",
     allow_model_download: bool = False,
+    max_track_dist_px: float = 260.0,
+    max_misses: int = 999,
 ) -> List[Dict[str, Any]]:
     try:
         from ultralytics import YOLO
@@ -336,8 +339,24 @@ def _detect_players_with_ultralytics(
 
     model = YOLO(model_path)
     outputs: List[Dict[str, Any]] = []
+    prev_a: BBox | None = None
+    prev_b: BBox | None = None
+    miss_a = 0
+    miss_b = 0
 
-    for frame in tqdm(frames, desc="Step 3/6 Players (YOLO)", unit="frame"):
+    for frame_idx, frame in enumerate(tqdm(frames, desc="Step 3/6 Players (YOLO)", unit="frame")):
+        frame_h, frame_w = frame.shape[:2]
+        frame_kps = court_points[frame_idx] if court_points is not None and frame_idx < len(court_points) else None
+        hull = _build_court_hull(frame_kps)
+        x_limits = _court_x_limits(frame_kps)
+        if x_limits is not None:
+            court_span = max(1.0, float(x_limits[1] - x_limits[0]))
+            x_margin = float(max(120.0, min(320.0, 0.30 * court_span)))
+        else:
+            x_margin = 220.0
+        min_area = float(max(650.0, 0.00014 * frame_h * frame_w))
+        max_area = float(0.18 * frame_h * frame_w)
+
         results = model.track(
             source=frame,
             persist=True,
@@ -361,11 +380,105 @@ def _detect_players_with_ultralytics(
                 if clss[i] != 0:
                     continue
                 x1, y1, x2, y2 = [float(v) for v in xyxy[i].tolist()]
-                candidates.append({"id": int(ids[i]), "bbox": (x1, y1, x2, y2), "conf": float(confs[i])})
+                bbox = (x1, y1, x2, y2)
+                area = _bbox_area(bbox)
+                if area < min_area or area > max_area:
+                    continue
+                if y2 < 0.10 * frame_h or y1 > 0.96 * frame_h:
+                    continue
+                if not _is_footpoint_in_hull(bbox, hull, x_limits=x_limits, margin_px=150.0, x_margin_px=x_margin):
+                    continue
+                candidates.append({"id": int(ids[i]), "bbox": bbox, "score": float(confs[i])})
 
-        outputs.append(_canonical_two_players(candidates))
+        if prev_a is None and prev_b is None:
+            cand_a, cand_b = _pick_initial_players(candidates, frame_h)
+        else:
+            near_candidates = [c for c in candidates if c["bbox"][3] >= 0.55 * frame_h]
+            far_candidates = [c for c in candidates if c["bbox"][3] < 0.86 * frame_h]
 
+            cand_a_pool = near_candidates if near_candidates else candidates
+            cand_a = _select_closest(prev_a, cand_a_pool, max_track_dist_px)
+
+            if cand_a is not None:
+                far_candidates = [c for c in far_candidates if _iou(c["bbox"], cand_a["bbox"]) < 0.9]
+
+            cand_b_pool = far_candidates if far_candidates else [c for c in candidates if cand_a is None or _iou(c["bbox"], cand_a["bbox"]) < 0.9]
+            cand_b = _select_closest(prev_b, cand_b_pool, max_track_dist_px)
+            if cand_b is None and prev_b is None:
+                cand_b = _select_closest(None, cand_b_pool, max_track_dist_px)
+
+            if cand_a is None and cand_b is None:
+                cand_a, cand_b = _pick_initial_players(candidates, frame_h)
+
+        if cand_a is not None:
+            prev_a = cand_a["bbox"]
+            miss_a = 0
+        else:
+            miss_a += 1
+            if miss_a > max_misses:
+                prev_a = None
+
+        if cand_b is not None:
+            prev_b = cand_b["bbox"]
+            miss_b = 0
+        else:
+            miss_b += 1
+            if miss_b > max_misses:
+                prev_b = None
+
+        # Keep semantic consistency: playerA is near side, playerB is far side.
+        if prev_a is not None and prev_b is not None and prev_a[3] < prev_b[3]:
+            prev_a, prev_b = prev_b, prev_a
+
+        tracks = []
+        if prev_a is not None:
+            tracks.append({"id": 1, "bbox": prev_a, "conf": float(cand_a["score"]) if cand_a else 0.0})
+        if prev_b is not None:
+            tracks.append({"id": 2, "bbox": prev_b, "conf": float(cand_b["score"]) if cand_b else 0.0})
+
+        outputs.append(
+            {
+                "playerA_bbox": prev_a,
+                "playerB_bbox": prev_b,
+                "playerA_id": 1 if prev_a is not None else None,
+                "playerB_id": 2 if prev_b is not None else None,
+                "tracks": tracks,
+            }
+        )
+
+    _propagate_player_boxes(outputs)
     return outputs
+
+
+def _propagate_player_boxes(outputs: List[Dict[str, Any]]) -> None:
+    # Keep both player boxes present for rendering continuity.
+    for bbox_key, id_key, stable_id in (
+        ("playerA_bbox", "playerA_id", 1),
+        ("playerB_bbox", "playerB_id", 2),
+    ):
+        if not outputs:
+            continue
+        first_idx = None
+        for i, row in enumerate(outputs):
+            if row.get(bbox_key) is not None:
+                first_idx = i
+                break
+        if first_idx is None:
+            continue
+
+        seed_bbox = outputs[first_idx][bbox_key]
+        for i in range(0, first_idx):
+            outputs[i][bbox_key] = seed_bbox
+            outputs[i][id_key] = stable_id
+
+        last_bbox = seed_bbox
+        for i in range(first_idx, len(outputs)):
+            bbox = outputs[i].get(bbox_key)
+            if bbox is None:
+                outputs[i][bbox_key] = last_bbox
+                outputs[i][id_key] = stable_id
+            else:
+                last_bbox = bbox
 
 
 def _detect_players_with_hog(frames: List[np.ndarray]) -> List[Dict[str, Any]]:
@@ -403,6 +516,7 @@ def detect_players(
     if back in {"yolo", "auto"}:
         outputs = _detect_players_with_ultralytics(
             frames,
+            court_points=court_points,
             model_path=model_path,
             conf=conf,
             iou=iou,

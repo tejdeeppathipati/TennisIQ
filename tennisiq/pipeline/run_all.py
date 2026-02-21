@@ -50,7 +50,7 @@ def parse_args():
     parser.add_argument("--allow-player-model-download", action="store_true")
     parser.add_argument("--court-use-refine-kps", action="store_true")
     parser.add_argument("--no-court-stabilization", action="store_true")
-    parser.add_argument("--court-homography-min-confidence", type=float, default=0.18)
+    parser.add_argument("--court-homography-min-confidence", type=float, default=0.24)
     parser.add_argument("--court-homography-carry-frames", type=int, default=5)
 
     parser.add_argument("--event-model-path", type=str, default=None)

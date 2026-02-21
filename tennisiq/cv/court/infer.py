@@ -150,7 +150,7 @@ def parse_args():
     parser.add_argument("--use-refine-kps", action="store_true")
     parser.add_argument("--use-homography", action="store_true")
     parser.add_argument("--no-homography-stabilization", action="store_true", help="Disable temporal homography stabilization for video inference.")
-    parser.add_argument("--homography-min-confidence", type=float, default=0.18)
+    parser.add_argument("--homography-min-confidence", type=float, default=0.24)
     parser.add_argument("--homography-carry-frames", type=int, default=5)
     parser.add_argument("--device", type=str, default="auto", choices=["auto", "cpu", "cuda", "mps"])
     return parser.parse_args()
