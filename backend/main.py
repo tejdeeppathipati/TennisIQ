@@ -7,6 +7,7 @@ Modal pipeline spawned non-blocking via modal_runner.py.
 import os
 import re
 import json
+import math
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,9 +21,9 @@ from pydantic import BaseModel, HttpUrl
 from dotenv import load_dotenv
 
 try:
-    from analysis import build_analysis, write_analysis_bundle
+    from analysis import build_analysis, write_analysis_bundle, rebuild_analytics, rebuild_player_cards, rebuild_match_flow
 except ModuleNotFoundError:
-    from backend.analysis import build_analysis, write_analysis_bundle
+    from backend.analysis import build_analysis, write_analysis_bundle, rebuild_analytics, rebuild_player_cards, rebuild_match_flow
 
 import db
 import modal_runner
@@ -65,7 +66,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8001")
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", os.path.join(os.path.dirname(__file__), "..", "outputs"))
 DEFAULT_CONFIG = {
     "fps": 30,
@@ -593,7 +594,7 @@ async def get_results_data(job_id: str):
         "status": job["status"],
         "footage_url": job.get("footage_url"),
         "overlay_video_url": None,
-        "raw_video_url": job.get("footage_url"),
+        "raw_video_url": None,
         "points": [],
         "events": [],
         "coaching_cards": [],
@@ -609,6 +610,7 @@ async def get_results_data(job_id: str):
         "player_a_card": None,
         "player_b_card": None,
         "match_flow": None,
+        "historical_insights": None,
     }
 
     def _load_json(relpath: str):
@@ -639,6 +641,33 @@ async def get_results_data(job_id: str):
     write_analysis_bundle(run_dir, analysis)
 
     raw_video_path = run_dir / "raw_video.mp4"
+    if not raw_video_path.exists():
+        footage = job.get("footage_url", "")
+        if footage.startswith("file://"):
+            src = footage[7:]
+            if os.path.exists(src):
+                try:
+                    import shutil
+                    shutil.copy2(src, str(raw_video_path))
+                    logger.info("Copied raw video from upload to %s", raw_video_path)
+                except Exception as exc:
+                    logger.warning("Failed to copy raw video: %s", exc)
+        else:
+            # Check uploads dir for any saved copy matching this job
+            upload_dir = os.getenv("UPLOAD_DIR", os.path.join(os.path.dirname(__file__), "uploads"))
+            for candidate in [
+                os.path.join(upload_dir, f"{job_id}.mp4"),
+                os.path.join(upload_dir, f"{job_id}.mkv"),
+                os.path.join(upload_dir, f"{job_id}.mov"),
+            ]:
+                if os.path.exists(candidate):
+                    try:
+                        import shutil
+                        shutil.copy2(candidate, str(raw_video_path))
+                        logger.info("Copied raw video from uploads to %s", raw_video_path)
+                    except Exception as exc:
+                        logger.warning("Failed to copy raw video from uploads: %s", exc)
+                    break
     if raw_video_path.exists():
         data["raw_video_url"] = f"{api_base}/raw_video.mp4"
         data["downloads"].append({"label": "Raw Video", "href": f"{api_base}/raw_video.mp4"})
@@ -690,10 +719,47 @@ async def get_results_data(job_id: str):
     data["player_b_card"] = _load_json("player_b_card.json")
     data["match_flow"] = _load_json("match_flow.json")
 
+    # Detect zeros in analytics and rebuild from shots/points if needed
+    _analytics_ok = False
+    if data["analytics"]:
+        _total_shots = data["analytics"].get("total_shots", 0) or 0
+        _total_points = data["analytics"].get("total_points", 0) or 0
+        _analytics_ok = int(_total_shots) > 0 and int(_total_points) > 0
+
+    if not _analytics_ok and (data["shots"] or data["points"]):
+        try:
+            rebuilt = rebuild_analytics(run_dir)
+            if rebuilt and rebuilt.get("total_shots", 0) > 0:
+                data["analytics"] = rebuilt
+                (run_dir / "analytics.json").write_text(json.dumps(rebuilt, indent=2))
+                logger.info("Rebuilt analytics.json for job %s (%d shots, %d points)",
+                            job_id, rebuilt["total_shots"], rebuilt["total_points"])
+
+                card_a, card_b = rebuild_player_cards(run_dir, rebuilt)
+                if card_a:
+                    data["player_a_card"] = card_a
+                    (run_dir / "player_a_card.json").write_text(json.dumps(card_a, indent=2))
+                if card_b:
+                    data["player_b_card"] = card_b
+                    (run_dir / "player_b_card.json").write_text(json.dumps(card_b, indent=2))
+
+                mf = rebuild_match_flow(run_dir)
+                if mf:
+                    data["match_flow"] = mf
+                    (run_dir / "match_flow.json").write_text(json.dumps(mf, indent=2))
+        except Exception as exc:
+            logger.warning("Failed to rebuild analytics for job %s: %s", job_id, exc)
+
     if data["analytics"]:
         data["downloads"].append({"label": "Analytics JSON", "href": f"{api_base}/analytics.json"})
     if data["shots"]:
         data["downloads"].append({"label": "Shots JSON", "href": f"{api_base}/shots.json"})
+
+    try:
+        data["historical_insights"] = _build_historical_insights(job_id, data["analytics"])
+    except Exception as exc:
+        logger.warning("Failed to compute historical insights for job %s: %s", job_id, exc)
+        data["historical_insights"] = None
 
     clips_dir = run_dir / "clips"
     if clips_dir.is_dir():
@@ -758,6 +824,184 @@ def _generate_coaching_cards_from_points(points: list) -> list:
             "confidence": pt.get("confidence", 0),
         })
     return cards
+
+
+def _load_json_file(path: Path):
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _to_pct(value: Optional[float]) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value) * 100.0
+    except (TypeError, ValueError):
+        return None
+
+
+def _avg(values: list[float]) -> Optional[float]:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _build_player_history(entries: list[dict], player_key: str, current_job_id: str) -> dict:
+    """Aggregate historical trend context for one player slot (A/B)."""
+    series_backhand: list[dict] = []
+    series_long_rally: list[dict] = []
+    series_first_serve: list[dict] = []
+    series_speed_kmh: list[dict] = []
+
+    for e in entries:
+        analytics = e.get("analytics") or {}
+        p = analytics.get(player_key) or {}
+        job_id = e.get("job_id")
+
+        by_shot = p.get("error_rate_by_shot_type") or {}
+        by_rally = p.get("error_rate_by_rally_length") or {}
+        bh = by_shot.get("backhand")
+        lr_79 = by_rally.get("7-9")
+        lr_10 = by_rally.get("10+")
+        lr = max(
+            [x for x in [lr_79, lr_10] if isinstance(x, (int, float))],
+            default=None,
+        )
+        fs = p.get("first_serve_pct")
+        speed_kmh = None
+        if isinstance(p.get("avg_shot_speed_m_s"), (int, float)):
+            speed_kmh = float(p["avg_shot_speed_m_s"]) * 3.6
+
+        if isinstance(bh, (int, float)):
+            series_backhand.append({"job_id": job_id, "value": float(bh)})
+        if isinstance(lr, (int, float)):
+            series_long_rally.append({"job_id": job_id, "value": float(lr)})
+        if isinstance(fs, (int, float)):
+            series_first_serve.append({"job_id": job_id, "value": float(fs)})
+        if isinstance(speed_kmh, (int, float)):
+            series_speed_kmh.append({"job_id": job_id, "value": float(speed_kmh)})
+
+    match_count = len(entries)
+    baseline_backhand = _avg([x["value"] for x in series_backhand])
+    baseline_long = _avg([x["value"] for x in series_long_rally])
+    baseline_first_serve = _avg([x["value"] for x in series_first_serve])
+    baseline_speed = _avg([x["value"] for x in series_speed_kmh])
+
+    current_backhand = next((x["value"] for x in series_backhand if x["job_id"] == current_job_id), None)
+    current_long = next((x["value"] for x in series_long_rally if x["job_id"] == current_job_id), None)
+    current_first_serve = next((x["value"] for x in series_first_serve if x["job_id"] == current_job_id), None)
+    current_speed = next((x["value"] for x in series_speed_kmh if x["job_id"] == current_job_id), None)
+
+    bh_high = sum(1 for x in series_backhand if x["value"] >= 0.30)
+    long_high = sum(1 for x in series_long_rally if x["value"] >= 0.50)
+    serve_low = sum(1 for x in series_first_serve if x["value"] < 0.60)
+    bh_need = max(2, math.ceil(len(series_backhand) * 0.6)) if series_backhand else 0
+    long_need = max(2, math.ceil(len(series_long_rally) * 0.6)) if series_long_rally else 0
+    serve_need = max(2, math.ceil(len(series_first_serve) * 0.6)) if series_first_serve else 0
+
+    persistent = []
+    if series_backhand:
+        persistent.append({
+            "name": "Backhand consistency",
+            "baseline_rate_pct": round((_to_pct(baseline_backhand) or 0), 1),
+            "matches_triggered": bh_high,
+            "matches_with_data": len(series_backhand),
+            "confirmed": bh_high >= bh_need,
+        })
+    if series_long_rally:
+        persistent.append({
+            "name": "Long-rally errors (7+ shots)",
+            "baseline_rate_pct": round((_to_pct(baseline_long) or 0), 1),
+            "matches_triggered": long_high,
+            "matches_with_data": len(series_long_rally),
+            "confirmed": long_high >= long_need,
+        })
+    if series_first_serve:
+        persistent.append({
+            "name": "First-serve reliability",
+            "baseline_rate_pct": round((_to_pct(baseline_first_serve) or 0), 1),
+            "matches_triggered": serve_low,
+            "matches_with_data": len(series_first_serve),
+            "confirmed": serve_low >= serve_need,
+        })
+
+    summary = []
+    if match_count >= 3 and baseline_backhand is not None:
+        summary.append(
+            f"Backhand error averages {(_to_pct(baseline_backhand) or 0):.1f}% across {match_count} matches."
+        )
+    if match_count >= 3 and baseline_long is not None:
+        summary.append(
+            f"Long-rally error averages {(_to_pct(baseline_long) or 0):.1f}% across {match_count} matches."
+        )
+    if match_count >= 3 and current_backhand is not None and baseline_backhand is not None:
+        delta_pp = (_to_pct(current_backhand) or 0) - (_to_pct(baseline_backhand) or 0)
+        summary.append(
+            f"Today vs baseline: backhand error {'+' if delta_pp >= 0 else ''}{delta_pp:.1f} percentage points."
+        )
+
+    return {
+        "match_count": match_count,
+        "baseline": {
+            "backhand_error_rate_pct": round((_to_pct(baseline_backhand) or 0), 1) if baseline_backhand is not None else None,
+            "long_rally_error_rate_pct": round((_to_pct(baseline_long) or 0), 1) if baseline_long is not None else None,
+            "first_serve_pct": round((_to_pct(baseline_first_serve) or 0), 1) if baseline_first_serve is not None else None,
+            "avg_shot_speed_kmh": round(baseline_speed, 1) if baseline_speed is not None else None,
+        },
+        "current_vs_baseline": {
+            "backhand_error_delta_pp": round(((_to_pct(current_backhand) or 0) - (_to_pct(baseline_backhand) or 0)), 1)
+            if current_backhand is not None and baseline_backhand is not None else None,
+            "long_rally_error_delta_pp": round(((_to_pct(current_long) or 0) - (_to_pct(baseline_long) or 0)), 1)
+            if current_long is not None and baseline_long is not None else None,
+            "first_serve_delta_pp": round(((_to_pct(current_first_serve) or 0) - (_to_pct(baseline_first_serve) or 0)), 1)
+            if current_first_serve is not None and baseline_first_serve is not None else None,
+            "avg_shot_speed_delta_kmh": round((current_speed - baseline_speed), 1)
+            if current_speed is not None and baseline_speed is not None else None,
+        },
+        "persistent_weaknesses": persistent,
+        "summary": summary,
+    }
+
+
+def _build_historical_insights(current_job_id: str, current_analytics: Optional[dict]) -> dict:
+    entries = []
+    outputs_dir = Path(outputs_abs)
+    if outputs_dir.is_dir():
+        for p in outputs_dir.iterdir():
+            if not p.is_dir():
+                continue
+            analytics = _load_json_file(p / "analytics.json")
+            if not isinstance(analytics, dict):
+                continue
+            if int(analytics.get("total_points", 0) or 0) <= 0:
+                continue
+            entries.append({"job_id": p.name, "analytics": analytics})
+
+    if current_analytics:
+        replaced = False
+        for e in entries:
+            if e["job_id"] == current_job_id:
+                e["analytics"] = current_analytics
+                replaced = True
+                break
+        if not replaced:
+            entries.append({"job_id": current_job_id, "analytics": current_analytics})
+
+    # Stable order for deterministic trend output.
+    entries.sort(key=lambda e: e["job_id"])
+    match_count = len(entries)
+
+    return {
+        "enabled": match_count >= 3,
+        "minimum_matches": 3,
+        "total_matches_considered": match_count,
+        "player_a": _build_player_history(entries, "player_a", current_job_id),
+        "player_b": _build_player_history(entries, "player_b", current_job_id),
+    }
 
 
 def _generate_serve_placement_from_points(points: list) -> dict | None:
@@ -827,6 +1071,76 @@ def _positions_to_heatmap(positions: list, label: str) -> dict:
         "y_edges": y_edges.tolist(),
         "total_frames": len(positions),
     }
+
+
+# ── Coach Notes ───────────────────────────────────────────────────────────────
+
+
+class CoachNoteCreate(BaseModel):
+    timestamp_sec: float
+    note_text: str
+    player: str = "player_a"
+
+
+class CoachNoteCreateInline(BaseModel):
+    point_idx: int
+    timestamp_sec: float
+    note_text: str
+    player: str = "player_a"
+
+
+@app.post("/notes/{job_id}/{point_idx}")
+async def create_coach_note(job_id: str, point_idx: int, body: CoachNoteCreate):
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if body.player not in ("player_a", "player_b"):
+        raise HTTPException(status_code=400, detail="player must be 'player_a' or 'player_b'.")
+    note_id = db.save_coach_note(job_id, point_idx, body.timestamp_sec, body.note_text, body.player)
+    return {"ok": True, "id": note_id}
+
+
+@app.get("/notes/{job_id}")
+async def list_coach_notes(job_id: str):
+    job = db.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    notes = db.get_coach_notes(job_id)
+    return {"job_id": job_id, "notes": notes}
+
+
+@app.delete("/notes/{job_id}/{note_id}")
+async def remove_coach_note(job_id: str, note_id: int):
+    deleted = db.delete_coach_note(note_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Note not found.")
+    return {"ok": True}
+
+
+# Compatibility aliases for clients using /results/{job_id}/notes paths.
+@app.post("/results/{job_id}/notes")
+async def create_coach_note_results_inline(job_id: str, body: CoachNoteCreateInline):
+    note_body = CoachNoteCreate(
+        timestamp_sec=body.timestamp_sec,
+        note_text=body.note_text,
+        player=body.player,
+    )
+    return await create_coach_note(job_id, body.point_idx, note_body)
+
+
+@app.post("/results/{job_id}/notes/{point_idx}")
+async def create_coach_note_results_alias(job_id: str, point_idx: int, body: CoachNoteCreate):
+    return await create_coach_note(job_id, point_idx, body)
+
+
+@app.get("/results/{job_id}/notes")
+async def list_coach_notes_results_alias(job_id: str):
+    return await list_coach_notes(job_id)
+
+
+@app.delete("/results/{job_id}/notes/{note_id}")
+async def remove_coach_note_results_alias(job_id: str, note_id: int):
+    return await remove_coach_note(job_id, note_id)
 
 
 # ── Session Persistence (FR-47 / FR-48) ──────────────────────────────────────

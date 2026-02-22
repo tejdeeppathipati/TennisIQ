@@ -465,6 +465,474 @@ def _compute_event_timeline(events: list) -> list[dict]:
     return timeline
 
 
+def rebuild_analytics(run_dir: Path) -> dict | None:
+    """Rebuild AnalyticsData from shots.json + points.json when analytics.json has zeros."""
+    shots = _load_json(run_dir / "shots.json") or []
+    points = _load_json(run_dir / "points.json") or []
+    if not shots and not points:
+        return None
+
+    _enrich_points_with_last_owner(points, shots)
+
+    a_shots = [s for s in shots if s.get("owner") == "player_a"]
+    b_shots = [s for s in shots if s.get("owner") == "player_b"]
+
+    player_a = _build_player_analytics("player_a", a_shots, points)
+    player_b = _build_player_analytics("player_b", b_shots, points)
+
+    rally_dist = _build_rally_distribution(points)
+    rally_lengths = [p.get("rally_hit_count", 0) for p in points if isinstance(p, dict)]
+    rally_avg = sum(rally_lengths) / len(rally_lengths) if rally_lengths else 0.0
+
+    momentum = _build_momentum(points)
+    match_flow_data = _build_match_flow_points(points)
+    patterns = _build_shot_patterns(a_shots, b_shots)
+
+    return {
+        "player_a": player_a,
+        "player_b": player_b,
+        "rally_length_distribution": rally_dist,
+        "rally_length_avg": round(rally_avg, 1),
+        "total_points": len(points),
+        "total_shots": len(shots),
+        "momentum_data": momentum,
+        "match_flow": match_flow_data,
+        "shot_pattern_dominance": patterns,
+    }
+
+
+def _enrich_points_with_last_owner(points: list, shots: list) -> None:
+    """Fill in last_hit_owner from shots data when it's missing in points."""
+    sorted_shots = sorted(shots, key=lambda s: s.get("timestamp_sec", 0))
+    for pt in points:
+        if not isinstance(pt, dict):
+            continue
+        if pt.get("last_hit_owner"):
+            continue
+        start = pt.get("start_sec", 0)
+        end = pt.get("end_sec", 0)
+        last_owner = None
+        for s in sorted_shots:
+            ts = s.get("timestamp_sec", 0)
+            if start <= ts <= end + 0.5:
+                last_owner = s.get("owner")
+        if last_owner:
+            pt["last_hit_owner"] = last_owner
+
+
+def rebuild_player_cards(run_dir: Path, analytics: dict | None = None) -> tuple[dict | None, dict | None]:
+    """Rebuild player_a_card.json and player_b_card.json from analytics data."""
+    if analytics is None:
+        analytics = _load_json(run_dir / "analytics.json")
+    if not analytics:
+        return None, None
+
+    pa = analytics.get("player_a", {})
+    pb = analytics.get("player_b", {})
+    patterns = analytics.get("shot_pattern_dominance", {})
+
+    card_a = _build_player_card("player_a", pa, patterns.get("player_a", []))
+    card_b = _build_player_card("player_b", pb, patterns.get("player_b", []))
+    return card_a, card_b
+
+
+def rebuild_match_flow(run_dir: Path) -> dict | None:
+    """Rebuild match_flow.json from points.json + shots.json."""
+    points = _load_json(run_dir / "points.json") or []
+    shots = _load_json(run_dir / "shots.json") or []
+    if not points:
+        return None
+    _enrich_points_with_last_owner(points, shots)
+
+    insights = []
+    rally_lengths = [p.get("rally_hit_count", 0) for p in points if isinstance(p, dict)]
+
+    winners = []
+    for p in points:
+        er = p.get("end_reason", "")
+        last_owner = p.get("last_hit_owner") or p.get("serve_player")
+        if er in ("OUT", "NET", "NET_FAULT", "OUT_LONG", "OUT_WIDE"):
+            winner = "player_b" if last_owner == "player_a" else "player_a"
+        else:
+            winner = last_owner or "player_a"
+        winners.append(winner)
+
+    max_streak = 0
+    cur_streak = 0
+    streak_player = None
+    streak_start_idx = 0
+    for i, w in enumerate(winners):
+        if w == streak_player:
+            cur_streak += 1
+        else:
+            if cur_streak >= 3:
+                ts_start = points[streak_start_idx].get("start_sec")
+                ts_end = points[i - 1].get("end_sec")
+                player_label = "Player A" if streak_player == "player_a" else "Player B"
+                insights.append({
+                    "description": f"{player_label} won {cur_streak} consecutive points — a momentum surge.",
+                    "timestamp_range": [ts_start, ts_end] if ts_start and ts_end else None,
+                })
+            streak_player = w
+            cur_streak = 1
+            streak_start_idx = i
+        max_streak = max(max_streak, cur_streak)
+    if cur_streak >= 3:
+        ts_start = points[streak_start_idx].get("start_sec")
+        ts_end = points[-1].get("end_sec")
+        player_label = "Player A" if streak_player == "player_a" else "Player B"
+        insights.append({
+            "description": f"{player_label} won {cur_streak} consecutive points — a momentum surge.",
+            "timestamp_range": [ts_start, ts_end] if ts_start and ts_end else None,
+        })
+
+    if len(rally_lengths) >= 4:
+        mid = len(rally_lengths) // 2
+        first_avg = sum(rally_lengths[:mid]) / mid if mid else 0
+        second_avg = sum(rally_lengths[mid:]) / (len(rally_lengths) - mid) if (len(rally_lengths) - mid) else 0
+        if abs(second_avg - first_avg) > 2:
+            direction = "increased" if second_avg > first_avg else "decreased"
+            insights.append({
+                "description": f"Rally length {direction} from {first_avg:.1f} shots (first half) to {second_avg:.1f} shots (second half).",
+                "timestamp_range": None,
+            })
+
+    overall_avg = sum(rally_lengths) / len(rally_lengths) if rally_lengths else 0
+    if overall_avg > 8:
+        insights.append({
+            "description": f"Long rallies dominate (avg {overall_avg:.1f} shots) — baseline-heavy match.",
+            "timestamp_range": None,
+        })
+    elif overall_avg < 4 and rally_lengths:
+        insights.append({
+            "description": f"Short rallies (avg {overall_avg:.1f} shots) — aggressive serve-and-volley or quick points.",
+            "timestamp_range": None,
+        })
+
+    return {"insights": insights}
+
+
+def _build_player_analytics(label: str, shots: list, points: list) -> dict:
+    total = len(shots)
+    type_counts: dict[str, int] = {}
+    dir_counts: dict[str, dict[str, int]] = {}
+    speeds: list[float] = []
+    positions: list[tuple[float, float]] = []
+
+    for s in shots:
+        st = s.get("shot_type", "unknown")
+        type_counts[st] = type_counts.get(st, 0) + 1
+
+        d = s.get("ball_direction_label", "unknown")
+        if st not in dir_counts:
+            dir_counts[st] = {}
+        dir_counts[st][d] = dir_counts[st].get(d, 0) + 1
+
+        spd = s.get("speed_m_s")
+        if isinstance(spd, (int, float)) and spd > 0:
+            speeds.append(float(spd))
+
+        xy = s.get("ball_court_xy")
+        if xy and len(xy) == 2 and xy[0] is not None and xy[1] is not None:
+            positions.append((float(xy[0]), float(xy[1])))
+
+    type_pcts = {k: round(v / total * 100, 1) for k, v in type_counts.items()} if total else {}
+    dir_pcts: dict[str, dict[str, float]] = {}
+    for st, dirs in dir_counts.items():
+        st_total = sum(dirs.values())
+        dir_pcts[st] = {d: round(c / st_total * 100, 1) for d, c in dirs.items()} if st_total else {}
+
+    error_by_shot: dict[str, int] = {}
+    error_by_rally: dict[str, int] = {}
+    total_by_rally: dict[str, int] = {}
+    serve_zones: dict[str, int] = {}
+    serve_wins: dict[str, int] = {}
+    serve_total: dict[str, int] = {}
+    double_faults = 0
+    first_serve_attempts = 0
+    first_serve_in = 0
+    points_won = 0
+    points_lost = 0
+
+    for pt in points:
+        if not isinstance(pt, dict):
+            continue
+        rally = pt.get("rally_hit_count", 0)
+        bucket = "1-3" if rally <= 3 else "4-6" if rally <= 6 else "7-9" if rally <= 9 else "10+"
+        total_by_rally[bucket] = total_by_rally.get(bucket, 0) + 1
+
+        er = pt.get("end_reason", "")
+        last_owner = pt.get("last_hit_owner") or pt.get("serve_player")
+        is_error = er in ("OUT", "NET", "NET_FAULT", "OUT_LONG", "OUT_WIDE")
+        loser = last_owner if is_error else None
+        winner = None
+        if is_error:
+            winner = "player_b" if last_owner == "player_a" else "player_a"
+        else:
+            winner = last_owner or "player_a"
+
+        if winner == label:
+            points_won += 1
+        elif loser == label or (winner and winner != label):
+            points_lost += 1
+
+        if loser == label:
+            error_by_rally[bucket] = error_by_rally.get(bucket, 0) + 1
+
+        sp = pt.get("serve_player")
+        if sp == label:
+            zone = pt.get("serve_zone", "unknown")
+            serve_zones[zone] = serve_zones.get(zone, 0) + 1
+            serve_total[zone] = serve_total.get(zone, 0) + 1
+            if winner == label:
+                serve_wins[zone] = serve_wins.get(zone, 0) + 1
+
+            fault = pt.get("serve_fault_type")
+            if fault == "double":
+                double_faults += 1
+
+    error_rate_by_shot: dict[str, float] = {}
+    for s in shots:
+        st = s.get("shot_type", "unknown")
+        ts = s.get("timestamp_sec", 0)
+        for pt in points:
+            if not isinstance(pt, dict):
+                continue
+            end_sec = pt.get("end_sec", 0)
+            er = pt.get("end_reason", "")
+            last_owner = pt.get("last_hit_owner") or pt.get("serve_player")
+            if (abs(ts - end_sec) < 1.5 and er in ("OUT", "NET", "NET_FAULT", "OUT_LONG", "OUT_WIDE")
+                    and last_owner == label):
+                error_by_shot[st] = error_by_shot.get(st, 0) + 1
+                break
+
+    for st, errs in error_by_shot.items():
+        tc = type_counts.get(st, 0)
+        if tc > 0:
+            error_rate_by_shot[st] = round(errs / tc * 100, 1)
+
+    error_rate_by_rally: dict[str, float] = {}
+    for bucket, errs in error_by_rally.items():
+        t = total_by_rally.get(bucket, 0)
+        if t > 0:
+            error_rate_by_rally[bucket] = round(errs / t * 100, 1)
+
+    serve_zone_win_rate: dict[str, float] = {}
+    for zone, t in serve_total.items():
+        if t > 0:
+            serve_zone_win_rate[zone] = round(serve_wins.get(zone, 0) / t * 100, 1)
+
+    avg_speed = round(sum(speeds) / len(speeds), 1) if speeds else 0.0
+    total_dist = 0.0
+    for i in range(1, len(positions)):
+        dx = positions[i][0] - positions[i - 1][0]
+        dy = positions[i][1] - positions[i - 1][1]
+        total_dist += (dx ** 2 + dy ** 2) ** 0.5
+
+    cx = round(sum(p[0] for p in positions) / len(positions), 1) if positions else 0.0
+    cy = round(sum(p[1] for p in positions) / len(positions), 1) if positions else 0.0
+
+    return {
+        "label": label,
+        "total_shots": total,
+        "shot_type_counts": type_counts,
+        "shot_type_pcts": type_pcts,
+        "shot_direction_counts": dir_counts,
+        "shot_direction_pcts": dir_pcts,
+        "error_by_shot_type": error_by_shot,
+        "error_rate_by_shot_type": error_rate_by_shot,
+        "error_by_rally_length": error_by_rally,
+        "error_rate_by_rally_length": error_rate_by_rally,
+        "avg_shot_speed_m_s": avg_speed,
+        "total_distance_covered": round(total_dist, 1),
+        "center_of_gravity": [cx, cy],
+        "first_serve_pct": round(first_serve_in / first_serve_attempts * 100, 1) if first_serve_attempts else 0.0,
+        "double_fault_count": double_faults,
+        "serve_zone_win_rate": serve_zone_win_rate,
+        "serve_placement_counts": serve_zones,
+        "points_won": points_won,
+        "points_lost": points_lost,
+    }
+
+
+def _build_rally_distribution(points: list) -> dict[str, int]:
+    dist: dict[str, int] = {}
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        r = p.get("rally_hit_count", 0)
+        bucket = "1-3" if r <= 3 else "4-6" if r <= 6 else "7-9" if r <= 9 else "10+"
+        dist[bucket] = dist.get(bucket, 0) + 1
+    return dist
+
+
+def _build_momentum(points: list) -> list[dict]:
+    momentum = []
+    a_m = 0
+    b_m = 0
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        er = p.get("end_reason", "")
+        last_owner = p.get("last_hit_owner") or p.get("serve_player")
+        is_error = er in ("OUT", "NET", "NET_FAULT", "OUT_LONG", "OUT_WIDE", "DOUBLE_BOUNCE")
+        if is_error:
+            winner = "player_b" if last_owner == "player_a" else "player_a"
+        else:
+            winner = last_owner or "player_a"
+
+        if winner == "player_a":
+            a_m += 1
+            b_m = max(0, b_m - 1)
+        else:
+            b_m += 1
+            a_m = max(0, a_m - 1)
+
+        momentum.append({
+            "point_idx": p.get("point_idx", len(momentum)),
+            "timestamp_sec": p.get("start_sec", 0),
+            "winner": winner,
+            "a_momentum": a_m,
+            "b_momentum": b_m,
+            "rally_length": p.get("rally_hit_count", 0),
+        })
+    return momentum
+
+
+def _build_match_flow_points(points: list) -> list[dict]:
+    flow = []
+    for p in points:
+        if not isinstance(p, dict):
+            continue
+        start = p.get("start_sec", 0)
+        end = p.get("end_sec", 0)
+        flow.append({
+            "point_idx": p.get("point_idx", len(flow)),
+            "timestamp_sec": start,
+            "rally_length": p.get("rally_hit_count", 0),
+            "end_reason": p.get("end_reason", "UNKNOWN"),
+            "duration_sec": round(end - start, 1) if isinstance(end, (int, float)) and isinstance(start, (int, float)) else 0,
+        })
+    return flow
+
+
+def _build_shot_patterns(a_shots: list, b_shots: list) -> dict[str, list[dict]]:
+    def _patterns_for(shots: list) -> list[dict]:
+        pat_counts: dict[str, dict] = {}
+        for s in shots:
+            st = s.get("shot_type", "unknown")
+            d = s.get("ball_direction_label", "unknown")
+            key = f"{st}_{d}"
+            if key not in pat_counts:
+                pat_counts[key] = {"pattern": key, "shot_type": st, "direction": d, "count": 0}
+            pat_counts[key]["count"] += 1
+        total = len(shots) or 1
+        result = sorted(pat_counts.values(), key=lambda x: -x["count"])
+        for p in result:
+            p["pct"] = round(p["count"] / total * 100, 1)
+        return result[:5]
+    return {"player_a": _patterns_for(a_shots), "player_b": _patterns_for(b_shots)}
+
+
+def _build_player_card(label: str, pa: dict, patterns: list) -> dict:
+    total = pa.get("total_shots", 0)
+    type_counts = pa.get("shot_type_counts", {})
+    type_pcts = pa.get("shot_type_pcts", {})
+    dir_pcts = pa.get("shot_direction_pcts", {})
+    error_rates = pa.get("error_rate_by_shot_type", {})
+    error_by_rally = pa.get("error_rate_by_rally_length", {})
+    name = "Player A" if label == "player_a" else "Player B"
+
+    tendencies = []
+    if total > 0:
+        dominant = max(type_counts, key=type_counts.get) if type_counts else None
+        if dominant:
+            tendencies.append(f"{name} primarily uses {dominant}s ({type_pcts.get(dominant, 0)}% of all shots).")
+        for st, dirs in dir_pcts.items():
+            if not dirs:
+                continue
+            top_dir = max(dirs, key=dirs.get)
+            if dirs[top_dir] >= 55:
+                tendencies.append(f"{name}'s {st} goes {top_dir.replace('_', ' ')} {dirs[top_dir]}% of the time.")
+        if patterns:
+            top = patterns[0]
+            tendencies.append(f"{name}'s most frequent pattern is {top['shot_type']} {top['direction'].replace('_', ' ')} ({top['pct']}% of shots).")
+    else:
+        tendencies.append(f"Insufficient shot data to determine {name}'s tendencies.")
+
+    exploit_plan = ""
+    weaknesses: list[dict] = []
+
+    for st, rate in error_rates.items():
+        count = pa.get("error_by_shot_type", {}).get(st, 0)
+        tc = type_counts.get(st, 0)
+        if rate >= 30 and count >= 2:
+            exploit_plan = f"Attack {name}'s {st} — {rate:.0f}% error rate ({count} errors this match). Force them to that wing in key moments."
+            weaknesses.append({
+                "description": f"{name}'s {st} breaks down under pressure — {rate:.0f}% error rate ({count} errors from {tc} attempts). Target their {st} side in critical points.",
+                "data_point": f"{count} errors / {tc} {st}s ({rate:.0f}% error rate)",
+                "points_cost": count,
+                "severity": round(min(rate / 100, 1.0), 3),
+            })
+
+    for st, dirs in dir_pcts.items():
+        if not dirs:
+            continue
+        top_dir = max(dirs, key=dirs.get)
+        if dirs[top_dir] >= 75:
+            pct = dirs[top_dir]
+            weaknesses.append({
+                "description": f"{name} telegraphs their {st} — {pct:.0f}% go {top_dir.replace('_', ' ')}. Opponent can position early and attack the predictable pattern.",
+                "data_point": f"{pct:.0f}% of {st}s go {top_dir.replace('_', ' ')}",
+                "points_cost": 0,
+                "severity": round(min(pct / 100, 1.0), 3),
+            })
+
+    for bucket, rate in error_by_rally.items():
+        errs = pa.get("error_by_rally_length", {}).get(bucket, 0)
+        if rate >= 50 and errs >= 2:
+            weaknesses.append({
+                "description": f"{name}'s error rate spikes in {bucket}-shot rallies ({rate:.0f}%). Extend rallies to exploit this.",
+                "data_point": f"{rate:.0f}% error rate in {bucket}-shot rallies",
+                "points_cost": errs,
+                "severity": round(min(rate / 100, 1.0), 3),
+            })
+
+    weaknesses.sort(key=lambda w: -w["severity"])
+
+    dist_parts = ", ".join(f"{k}: {v}" for k, v in sorted(type_counts.items(), key=lambda x: -x[1]))
+    shot_dist_summary = f"Shot breakdown: {dist_parts} (total: {total})" if total else ""
+    cov = pa.get("total_distance_covered", 0)
+    cog = pa.get("center_of_gravity", [0, 0])
+    cov_summary = f"{name} covered {int(cov)} court units. Average position: ({int(cog[0])}, {int(cog[1])})." if cov else ""
+
+    serve_summary = ""
+    szwr = pa.get("serve_zone_win_rate", {})
+    spc = pa.get("serve_placement_counts", {})
+    if spc:
+        parts = [f"{z}: {c}" for z, c in spc.items()]
+        serve_summary = f"Serve zones: {', '.join(parts)}."
+        if szwr:
+            best = max(szwr, key=szwr.get) if szwr else None
+            if best:
+                serve_summary += f" Best zone: {best.replace('_', ' ')} ({szwr[best]}% win rate)."
+
+    return {
+        "card": {
+            "label": label,
+            "exploit_plan": exploit_plan,
+            "tendencies": tendencies,
+            "serve_summary": serve_summary,
+            "shot_distribution_summary": shot_dist_summary,
+            "coverage_summary": cov_summary,
+        },
+        "weaknesses": {
+            "label": label,
+            "weaknesses": weaknesses,
+        },
+    }
+
+
 def write_analysis_bundle(run_dir: Path, analysis: dict | None) -> None:
     if analysis is None:
         return

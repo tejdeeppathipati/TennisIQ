@@ -760,11 +760,13 @@ def _run_pipeline(
                     logger.error(traceback.format_exc())
 
         # Copy raw video into outputs for the results page
-        if footage_url.startswith("file://"):
-            raw_src = footage_url[7:]
-            raw_dst = out_dir / "raw_video.mp4"
-            if not raw_dst.exists() and os.path.exists(raw_src):
-                shutil.copy2(raw_src, str(raw_dst))
+        raw_dst = out_dir / "raw_video.mp4"
+        if not raw_dst.exists() and os.path.exists(video_path):
+            try:
+                shutil.copy2(video_path, str(raw_dst))
+                logger.info(f"Copied raw video to {raw_dst}")
+            except Exception as e:
+                logger.warning(f"Failed to copy raw video: {e}")
 
         # Determine final status
         if succeeded == 0:

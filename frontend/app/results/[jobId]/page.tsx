@@ -1,35 +1,28 @@
 "use client";
 
-import { useEffect, useState, useCallback, use } from "react";
+import { useEffect, useState, useCallback, useRef, use } from "react";
 import Link from "next/link";
-import { getStatus, getResultsData } from "@/lib/api";
+import { getStatus, getResultsData, getCoachNotes } from "@/lib/api";
 import type {
   StatusResponse,
   ResultsDataResponse,
   DetectedPoint,
-  CoachingCard,
-  ServePlacement,
-  HeatmapData,
-  DownloadItem,
   PlayerCard,
+  ShotEvent,
+  CoachingCard,
   AnalyticsData,
   AnalysisData,
-  MatchFlowData,
+  CoachNote,
 } from "@/lib/types";
 import { STAGE_LABELS } from "@/lib/types";
 import ProgressTracker from "@/components/ProgressTracker";
 import CheckpointReview from "@/components/CheckpointReview";
-import SideBySidePlayer from "@/components/SideBySidePlayer";
-import PointTimeline from "@/components/PointTimeline";
-import CoachingCards from "@/components/CoachingCards";
+import PointClipViewer from "@/components/PointClipViewer";
+import PDFExport from "@/components/PDFExport";
 import PlayerCardView from "@/components/PlayerCardView";
 import WeaknessReport from "@/components/WeaknessReport";
-import MatchFlowChart from "@/components/MatchFlowChart";
-import ServePlacementChart from "@/components/ServePlacementChart";
-import HeatmapViewer from "@/components/HeatmapViewer";
-import HighlightClips from "@/components/HighlightClips";
-import DownloadPanel from "@/components/DownloadPanel";
-import AnalysisDashboard from "@/components/AnalysisDashboard";
+import MatchCharts from "@/components/MatchCharts";
+import HistoricalInsightsCard from "@/components/HistoricalInsightsCard";
 
 const POLL_INTERVAL = 5000;
 const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/+$/, "") || "/backend";
@@ -42,9 +35,11 @@ export default function ResultsPage({
   const { jobId } = use(params);
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [data, setData] = useState<ResultsDataResponse | null>(null);
-  const [seekTo, setSeekTo] = useState<number | null>(null);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [notes, setNotes] = useState<CoachNote[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Which point the user wants to jump to (driven by weakness evidence clicks / momentum clicks)
+  const [focusPointIdx, setFocusPointIdx] = useState<number | null>(null);
+  const pointClipsRef = useRef<HTMLDivElement>(null);
 
   const fetchStatus = useCallback(async () => {
     try {
@@ -54,6 +49,10 @@ export default function ResultsPage({
         if (s.status === "complete") {
           const d = await getResultsData(jobId);
           setData(d);
+          try {
+            const nr = await getCoachNotes(jobId);
+            setNotes(nr.notes);
+          } catch { /* no notes yet */ }
         }
         return false;
       }
@@ -82,10 +81,13 @@ export default function ResultsPage({
     };
   }, [fetchStatus]);
 
-  const handleSeekToPoint = (sec: number) => {
-    setSeekTo(sec);
-    setTimeout(() => setSeekTo(null), 100);
-  };
+  // Scroll to point clips and set focus index when a user clicks an evidence/momentum link
+  const handlePointFocus = useCallback((idx: number) => {
+    setFocusPointIdx(idx);
+    setTimeout(() => {
+      pointClipsRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 50);
+  }, []);
 
   if (error) {
     return (
@@ -117,33 +119,25 @@ export default function ResultsPage({
   const isError = status.status === "error";
   const isRunning = !isComplete && !isReview && !isError;
 
-  const overlayVideoUrl = data?.overlay_video_url
-    ? `${API_URL}${data.overlay_video_url}`
-    : undefined;
+  const points: DetectedPoint[] = data?.points ?? [];
+  const clipBaseUrl = `${API_URL}/outputs/${jobId}/clips`;
+
   const rawVideoUrl = data?.raw_video_url
     ? (data.raw_video_url.startsWith("/") ? `${API_URL}${data.raw_video_url}` : data.raw_video_url)
     : undefined;
-
-  const points: DetectedPoint[] = data?.points ?? [];
-  const coachingCards: CoachingCard[] = data?.coaching_cards ?? [];
-  const servePlacement: ServePlacement | null = data?.serve_placement ?? null;
-  const errorHeatmap: HeatmapData | null = data?.error_heatmap ?? null;
-  const playerAHeatmap: HeatmapData | null = data?.player_a_heatmap ?? null;
-  const playerBHeatmap: HeatmapData | null = data?.player_b_heatmap ?? null;
-  const downloads: DownloadItem[] = (data?.downloads ?? []).map((d) => ({
-    ...d,
-    href: `${API_URL}${d.href}`,
-  }));
-  const clipBaseUrl = `${API_URL}/outputs/${jobId}/clips`;
+  const overlayVideoUrl = data?.overlay_video_url
+    ? (data.overlay_video_url.startsWith("/") ? `${API_URL}${data.overlay_video_url}` : data.overlay_video_url)
+    : undefined;
 
   const playerACard: PlayerCard | null = data?.player_a_card ?? null;
   const playerBCard: PlayerCard | null = data?.player_b_card ?? null;
   const analyticsData: AnalyticsData | null = data?.analytics ?? null;
-  const matchFlow: MatchFlowData | null = data?.match_flow ?? null;
   const analysisBundle: AnalysisData | null = data?.analysis ?? null;
+  const historicalInsights = data?.historical_insights ?? null;
 
   return (
     <div className="min-h-screen bg-black text-white">
+      {/* ── Header ─────────────────────────────────────────────────────────── */}
       <header className="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
         <Link href="/" className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-xl bg-green-600 flex items-center justify-center text-sm font-black text-white">
@@ -159,8 +153,8 @@ export default function ResultsPage({
         </div>
       </header>
 
-      <div className="max-w-7xl mx-auto px-4 py-8 space-y-8">
-
+      <div className="max-w-7xl mx-auto px-4 py-8 space-y-10">
+        {/* Error banner */}
         {isError && (
           <div className="bg-red-950 border border-red-800 rounded-2xl p-6">
             <h2 className="text-red-300 font-bold mb-2">Pipeline Error</h2>
@@ -169,10 +163,44 @@ export default function ResultsPage({
         )}
 
         {isRunning && <ProgressTracker status={status} />}
-
         {isReview && <CheckpointReview jobId={jobId} onComplete={fetchStatus} />}
 
-        {/* Priority 1: Player Cards (the real product) */}
+        {/* ── 1. Full Match Video: Raw + CV Overlay side by side (Top) ─────── */}
+        {isComplete && (rawVideoUrl || overlayVideoUrl) && (
+          <div className="space-y-3">
+            <h3 className="text-base font-semibold text-white px-1">Full Match</h3>
+            <div
+              className={`grid gap-4 ${rawVideoUrl && overlayVideoUrl ? "grid-cols-1 lg:grid-cols-2" : "grid-cols-1"}`}
+            >
+              {rawVideoUrl && (
+                <div className="space-y-1.5">
+                  <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider px-1">
+                    Raw Footage
+                  </span>
+                  <div className="rounded-xl overflow-hidden bg-zinc-900 border border-zinc-800">
+                    <video src={rawVideoUrl} className="w-full aspect-video" controls playsInline>
+                      <track kind="captions" />
+                    </video>
+                  </div>
+                </div>
+              )}
+              {overlayVideoUrl && (
+                <div className="space-y-1.5">
+                  <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider px-1">
+                    CV Detection Overlay
+                  </span>
+                  <div className="rounded-xl overflow-hidden bg-zinc-900 border border-green-500/20">
+                    <video src={overlayVideoUrl} className="w-full aspect-video" controls playsInline>
+                      <track kind="captions" />
+                    </video>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── 2. Player Cards ─────────────────────────────────────────────── */}
         {isComplete && (playerACard || playerBCard) && (
           <PlayerCardView
             playerACard={playerACard}
@@ -181,92 +209,61 @@ export default function ResultsPage({
           />
         )}
 
-        {/* Priority 2: Weakness Reports */}
-        {isComplete && (playerACard || playerBCard) && (
+        {isComplete && <HistoricalInsightsCard history={historicalInsights} />}
+
+        {/* ── 3. Weakness Report (clickable evidence → jump to clip) ───────── */}
+        {isComplete && (playerACard || playerBCard) && points.length > 0 && (
           <WeaknessReport
             playerACard={playerACard}
             playerBCard={playerBCard}
+            points={points}
+            onEvidenceClick={handlePointFocus}
           />
         )}
 
-        {/* Priority 3: Match Flow */}
-        {isComplete && (analyticsData || matchFlow) && (
-          <MatchFlowChart
+        {/* ── 4. Match Trends (rally length + momentum, momentum is clickable) */}
+        {isComplete && points.length > 0 && (
+          <MatchCharts
+            points={points}
             analytics={analyticsData}
-            matchFlow={matchFlow}
+            onPointClick={handlePointFocus}
           />
         )}
 
-        {/* Priority 3.5: Analysis Dashboard (quality, serve, rally, errors charts) */}
-        {isComplete && analysisBundle && (
-          <AnalysisDashboard analysis={analysisBundle} />
+        {/* ── 5. Point Clips + Coach Notes ────────────────────────────────── */}
+        {isComplete && points.length > 0 && (
+          <div ref={pointClipsRef} id="point-clips-section" className="scroll-mt-6">
+            <PointClipViewer
+              jobId={jobId}
+              points={points}
+              clipBaseUrl={clipBaseUrl}
+              rawVideoUrl={rawVideoUrl}
+              initialPointIdx={focusPointIdx}
+            />
+          </div>
         )}
 
-        {/* Priority 4: Enhanced Coaching Cards */}
-        {isComplete && coachingCards.length > 0 && (
-          <CoachingCards
-            cards={coachingCards}
-            onSeekToPoint={handleSeekToPoint}
-          />
-        )}
-
-        {/* Demo features: Video, Timeline, Visualizations */}
+        {/* ── 6. Export Report (PDF) ──────────────────────────────────────── */}
         {isComplete && (
-          <SideBySidePlayer
-            rawVideoUrl={rawVideoUrl}
-            overlayVideoUrl={overlayVideoUrl}
-            onTimeUpdate={setCurrentTime}
-            seekTo={seekTo}
-          />
-        )}
-
-        {isComplete && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            <div className="lg:col-span-2 space-y-6">
-              <PointTimeline
-                points={points}
-                currentTime={currentTime}
-                onSeekToPoint={handleSeekToPoint}
-              />
-
-              <HighlightClips
-                points={points}
-                clipBaseUrl={clipBaseUrl}
-              />
+          <div className="border-t border-zinc-800 pt-8">
+            <div className="flex flex-col items-center gap-2 text-center mb-4">
+              <h3 className="text-base font-semibold text-white">Export Coach Report</h3>
+              <p className="text-xs text-zinc-500">
+                Full point breakdown, weakness analysis, and coach notes — formatted for players to take to practice.
+              </p>
             </div>
-
-            <div className="space-y-6">
-              <ServePlacementChart data={servePlacement} />
-
-              <HeatmapViewer
-                errorHeatmap={errorHeatmap}
-                playerAHeatmap={playerAHeatmap}
-                playerBHeatmap={playerBHeatmap}
+            <div className="flex justify-center">
+              <PDFExport
+                playerACard={playerACard}
+                playerBCard={playerBCard}
+                analytics={analyticsData}
+                analysis={analysisBundle}
+                notes={notes}
+                points={points}
+                shots={data?.shots ?? []}
+                coachingCards={data?.coaching_cards ?? []}
+                jobId={jobId}
               />
-
-              <DownloadPanel items={downloads} />
-
-              {data?.stats && (
-                <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 space-y-3">
-                  <h3 className="text-sm font-semibold text-zinc-300">Detection Stats</h3>
-                  <div className="grid grid-cols-2 gap-2 text-xs">
-                    <div className="text-zinc-500">Points detected</div>
-                    <div className="text-zinc-300">{points.length}</div>
-                    <div className="text-zinc-500">Total events</div>
-                    <div className="text-zinc-300">
-                      {(data.stats as Record<string, unknown>)?.events
-                        ? ((data.stats as Record<string, Record<string, number>>).events?.total ?? 0)
-                        : data.events?.length ?? 0}
-                    </div>
-                    <div className="text-zinc-500">Total shots</div>
-                    <div className="text-zinc-300">{data.shots?.length ?? 0}</div>
-                    <div className="text-zinc-500">Avg rally hits</div>
-                    <div className="text-zinc-300">
-                      {(data.stats as Record<string, Record<string, number>>)?.points?.avg_rally_hits?.toFixed(1) ?? "-"}
-                    </div>
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         )}
@@ -285,9 +282,7 @@ function StatusBadge({ status }: { status: string }) {
     error: "bg-red-950 text-red-400",
   };
   return (
-    <span
-      className={`px-2 py-1 rounded-lg text-xs font-medium ${colors[status] ?? "bg-zinc-800 text-zinc-400"}`}
-    >
+    <span className={`px-2 py-1 rounded-lg text-xs font-medium ${colors[status] ?? "bg-zinc-800 text-zinc-400"}`}>
       {STAGE_LABELS[status] ?? status}
     </span>
   );

@@ -4,6 +4,7 @@ import type {
   ResultsDataResponse,
   PointReviewResponse,
   Session,
+  CoachNote,
 } from "./types";
 
 const ENV_API_URL = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/+$/, "");
@@ -32,7 +33,7 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Cannot reach backend via ${apiUrl}. Start backend with: cd backend && python -m uvicorn main:app --host 127.0.0.1 --port 8002 (${message})`,
+      `Cannot reach backend via ${apiUrl}. Start backend with: cd backend && python -m uvicorn main:app --host 127.0.0.1 --port 8000 (${message})`,
     );
   }
   if (!res.ok) {
@@ -40,6 +41,22 @@ async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
     throw new Error(`API error ${res.status}: ${text}`);
   }
   return res.json() as Promise<T>;
+}
+
+async function apiFetchWithFallback<T>(
+  primaryPath: string,
+  fallbackPath: string,
+  options?: RequestInit,
+): Promise<T> {
+  try {
+    return await apiFetch<T>(primaryPath, options);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!message.includes("API error 404")) {
+      throw error;
+    }
+    return apiFetch<T>(fallbackPath, options);
+  }
 }
 
 export async function ingestURL(url: string): Promise<{ job_id: string; status: string }> {
@@ -62,7 +79,7 @@ export async function ingestUpload(file: File): Promise<{ job_id: string; status
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(
-      `Cannot reach backend via ${apiUrl}. Start backend with: cd backend && python -m uvicorn main:app --host 127.0.0.1 --port 8002 (${message})`,
+      `Cannot reach backend via ${apiUrl}. Start backend with: cd backend && python -m uvicorn main:app --host 127.0.0.1 --port 8000 (${message})`,
     );
   }
   if (!res.ok) {
@@ -129,4 +146,28 @@ export async function getSession(sessionId: string): Promise<Session> {
 export async function getLatestSession(coachId?: string): Promise<Session> {
   const cid = coachId || "default";
   return apiFetch(`/sessions/latest/${encodeURIComponent(cid)}`);
+}
+
+export async function getCoachNotes(jobId: string): Promise<{ job_id: string; notes: CoachNote[] }> {
+  return apiFetchWithFallback(`/notes/${jobId}`, `/results/${jobId}/notes`);
+}
+
+export async function createCoachNote(
+  jobId: string,
+  pointIdx: number,
+  timestampSec: number,
+  noteText: string,
+  player: "player_a" | "player_b" = "player_a",
+): Promise<{ ok: boolean; id: number }> {
+  return apiFetchWithFallback(`/notes/${jobId}/${pointIdx}`, `/results/${jobId}/notes/${pointIdx}`, {
+    method: "POST",
+    body: JSON.stringify({ timestamp_sec: timestampSec, note_text: noteText, player }),
+  });
+}
+
+export async function deleteCoachNote(
+  jobId: string,
+  noteId: number,
+): Promise<{ ok: boolean }> {
+  return apiFetchWithFallback(`/notes/${jobId}/${noteId}`, `/results/${jobId}/notes/${noteId}`, { method: "DELETE" });
 }

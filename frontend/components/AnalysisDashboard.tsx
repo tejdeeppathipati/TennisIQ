@@ -315,7 +315,8 @@ function PlotHistogram({
       y: { label: "count", grid: true },
       style: plotStyle,
       marks: [
-        Plot.rectY(values, Plot.binX({ y: "count" }, { x: (d) => d, fill: "#22c55e", fillOpacity: 0.7 })),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        Plot.rectY(values, Plot.binX({ y: "count" }, { x: (d: any) => d, fill: "#22c55e", fillOpacity: 0.7 } as any)),
         Plot.ruleY([0]),
       ],
     });
@@ -433,7 +434,7 @@ function statValue(stats?: StatSummary | null, key?: keyof StatSummary) {
 const plotStyle = {
   background: "transparent",
   color: "#e5e7eb",
-  fontSize: 11,
+  fontSize: "11px",
 };
 
 function formatSpeedDelta(before?: number | null, after?: number | null) {

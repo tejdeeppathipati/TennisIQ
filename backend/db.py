@@ -9,7 +9,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-DATABASE_PATH = os.getenv("DATABASE_PATH", "./courtai.db")
+_DB_DIR = os.path.dirname(os.path.abspath(__file__))
+DATABASE_PATH = os.getenv("DATABASE_PATH", os.path.join(_DB_DIR, "courtai.db"))
 
 
 def get_connection() -> sqlite3.Connection:
@@ -119,6 +120,17 @@ def init_db() -> None:
                 UNIQUE(job_id, point_idx)
             );
 
+            CREATE TABLE IF NOT EXISTS coach_notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                point_idx INTEGER NOT NULL,
+                timestamp_sec REAL NOT NULL,
+                note_text TEXT NOT NULL,
+                player TEXT NOT NULL DEFAULT 'player_a',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES jobs(id)
+            );
+
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 coach_id TEXT NOT NULL,
@@ -136,12 +148,90 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (job_id) REFERENCES jobs(id)
             );
+
+            -- Historical player registry: one row per named player tracked over time
+            CREATE TABLE IF NOT EXISTS players (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                coach_id TEXT NOT NULL DEFAULT 'default',
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            -- One row per (player, match/job) — the per-match stat snapshot
+            CREATE TABLE IF NOT EXISTS player_match_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                match_label TEXT,
+                match_date TEXT NOT NULL,
+                -- Core computed stats stored as JSON blobs for flexibility
+                shot_type_counts TEXT,         -- JSON: {forehand: N, backhand: N, ...}
+                error_rate_by_shot TEXT,       -- JSON: {forehand: 0.36, ...}
+                error_rate_by_rally TEXT,      -- JSON: {"1-3": 0.1, "4-6": 0.2, ...}
+                avg_shot_speed_kmh REAL,
+                first_serve_pct REAL,
+                double_fault_count INTEGER,
+                total_shots INTEGER,
+                total_points INTEGER,
+                points_won INTEGER,
+                points_lost INTEGER,
+                dominant_pattern TEXT,         -- top shot+direction combo string
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (player_id) REFERENCES players(id),
+                FOREIGN KEY (job_id) REFERENCES jobs(id),
+                UNIQUE(player_id, job_id)
+            );
         """)
-        # Migration: add output_dir to jobs if missing (for date-time output directories)
+        # Migration: add output_dir to jobs if missing
         cur = conn.execute("PRAGMA table_info(jobs)")
         columns = [row[1] for row in cur.fetchall()]
         if "output_dir" not in columns:
             conn.execute("ALTER TABLE jobs ADD COLUMN output_dir TEXT")
+
+        # Migration: add player column to coach_notes if missing
+        cur = conn.execute("PRAGMA table_info(coach_notes)")
+        cn_columns = [row[1] for row in cur.fetchall()]
+        if cn_columns and "player" not in cn_columns:
+            conn.execute("ALTER TABLE coach_notes ADD COLUMN player TEXT NOT NULL DEFAULT 'player_a'")
+
+        # Migration: ensure players / player_match_stats exist (already in CREATE IF NOT EXISTS above,
+        # but belt-and-suspenders in case DB was created before this migration ran)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS players (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                coach_id TEXT NOT NULL DEFAULT 'default',
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS player_match_stats (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                player_id TEXT NOT NULL,
+                job_id TEXT NOT NULL,
+                match_label TEXT,
+                match_date TEXT NOT NULL,
+                shot_type_counts TEXT,
+                error_rate_by_shot TEXT,
+                error_rate_by_rally TEXT,
+                avg_shot_speed_kmh REAL,
+                first_serve_pct REAL,
+                double_fault_count INTEGER,
+                total_shots INTEGER,
+                total_points INTEGER,
+                points_won INTEGER,
+                points_lost INTEGER,
+                dominant_pattern TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (player_id) REFERENCES players(id),
+                FOREIGN KEY (job_id) REFERENCES jobs(id),
+                UNIQUE(player_id, job_id)
+            )
+        """)
 
 
 def create_job(footage_url: str, footage_type: str = "youtube", config: Optional[dict] = None) -> str:
@@ -500,6 +590,277 @@ def get_latest_session_for_coach(coach_id: str = "default") -> Optional[dict]:
     """FR-48: Return the most recent session for loading preferences."""
     sessions = get_sessions_for_coach(coach_id)
     return sessions[0] if sessions else None
+
+
+def save_coach_note(job_id: str, point_idx: int, timestamp_sec: float, note_text: str, player: str = "player_a") -> int:
+    now = datetime.utcnow().isoformat()
+    with get_connection() as conn:
+        cur = conn.execute(
+            "INSERT INTO coach_notes (job_id, point_idx, timestamp_sec, note_text, player, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (job_id, point_idx, timestamp_sec, note_text, player, now),
+        )
+        return cur.lastrowid
+
+
+def get_coach_notes(job_id: str) -> list[dict]:
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM coach_notes WHERE job_id=? ORDER BY point_idx ASC, timestamp_sec ASC",
+            (job_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def delete_coach_note(note_id: int) -> bool:
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM coach_notes WHERE id=?", (note_id,))
+        return cur.rowcount > 0
+
+
+# ── Player history helpers ─────────────────────────────────────────────────────
+
+def create_player(name: str, coach_id: str = "default", notes: str = "") -> str:
+    """Create a new tracked player; return their ID."""
+    player_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat()
+    with get_connection() as conn:
+        conn.execute(
+            "INSERT INTO players (id, name, coach_id, notes, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (player_id, name.strip(), coach_id, notes, now, now),
+        )
+    return player_id
+
+
+def get_player(player_id: str) -> Optional[dict]:
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM players WHERE id=?", (player_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_players(coach_id: str = "default") -> list[dict]:
+    """Return all players for a coach ordered by name."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM players WHERE coach_id=? ORDER BY name ASC",
+            (coach_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_player(player_id: str, name: Optional[str] = None, notes: Optional[str] = None) -> bool:
+    now = datetime.utcnow().isoformat()
+    with get_connection() as conn:
+        row = conn.execute("SELECT * FROM players WHERE id=?", (player_id,)).fetchone()
+        if not row:
+            return False
+        new_name = name.strip() if name is not None else row["name"]
+        new_notes = notes if notes is not None else row["notes"]
+        conn.execute(
+            "UPDATE players SET name=?, notes=?, updated_at=? WHERE id=?",
+            (new_name, new_notes, now, player_id),
+        )
+        return True
+
+
+def delete_player(player_id: str) -> bool:
+    with get_connection() as conn:
+        cur = conn.execute("DELETE FROM players WHERE id=?", (player_id,))
+        conn.execute("DELETE FROM player_match_stats WHERE player_id=?", (player_id,))
+        return cur.rowcount > 0
+
+
+def save_player_match_stats(
+    player_id: str,
+    job_id: str,
+    analytics: dict,
+    player_key: str = "player_a",
+    match_label: str = "",
+    match_date: Optional[str] = None,
+) -> Optional[int]:
+    """Snapshot per-match stats for a player from the analytics blob.
+
+    analytics: the AnalyticsData dict from results.
+    player_key: "player_a" or "player_b".
+    Returns the new row id, or None if job already has a snapshot for this player.
+    """
+    pa = analytics.get(player_key) if analytics else None
+    if not pa:
+        return None
+
+    now = datetime.utcnow().isoformat()
+    date = match_date or now[:10]
+
+    # Derive dominant pattern: highest-count entry in shot_type_counts
+    stc = pa.get("shot_type_counts", {})
+    dominant = max(stc, key=lambda k: stc[k]) if stc else None
+
+    # Convert speeds from m/s → km/h
+    avg_kmh = round(pa.get("avg_shot_speed_m_s", 0) * 3.6, 1)
+
+    with get_connection() as conn:
+        try:
+            cur = conn.execute(
+                """INSERT INTO player_match_stats
+                   (player_id, job_id, match_label, match_date,
+                    shot_type_counts, error_rate_by_shot, error_rate_by_rally,
+                    avg_shot_speed_kmh, first_serve_pct, double_fault_count,
+                    total_shots, total_points, points_won, points_lost,
+                    dominant_pattern, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(player_id, job_id) DO UPDATE SET
+                       match_label=excluded.match_label,
+                       shot_type_counts=excluded.shot_type_counts,
+                       error_rate_by_shot=excluded.error_rate_by_shot,
+                       error_rate_by_rally=excluded.error_rate_by_rally,
+                       avg_shot_speed_kmh=excluded.avg_shot_speed_kmh,
+                       first_serve_pct=excluded.first_serve_pct,
+                       double_fault_count=excluded.double_fault_count,
+                       total_shots=excluded.total_shots,
+                       total_points=excluded.total_points,
+                       points_won=excluded.points_won,
+                       points_lost=excluded.points_lost,
+                       dominant_pattern=excluded.dominant_pattern""",
+                (
+                    player_id, job_id, match_label or "", date,
+                    json.dumps(pa.get("shot_type_counts", {})),
+                    json.dumps(pa.get("error_rate_by_shot_type", {})),
+                    json.dumps(pa.get("error_rate_by_rally_length", {})),
+                    avg_kmh,
+                    pa.get("first_serve_pct", 0),
+                    pa.get("double_fault_count", 0),
+                    pa.get("total_shots", 0),
+                    analytics.get("total_points", 0),
+                    pa.get("points_won", 0),
+                    pa.get("points_lost", 0),
+                    dominant,
+                    now,
+                ),
+            )
+            return cur.lastrowid
+        except Exception:
+            return None
+
+
+def get_player_match_history(player_id: str) -> list[dict]:
+    """Return all per-match stat rows for a player, oldest first."""
+    with get_connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM player_match_stats WHERE player_id=? ORDER BY match_date ASC, created_at ASC",
+            (player_id,),
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            for field in ("shot_type_counts", "error_rate_by_shot", "error_rate_by_rally"):
+                try:
+                    d[field] = json.loads(d[field]) if d[field] else {}
+                except (json.JSONDecodeError, TypeError):
+                    d[field] = {}
+            result.append(d)
+        return result
+
+
+def compute_player_trends(player_id: str) -> dict:
+    """Compute trend analytics across all matches for a player.
+
+    Returns a dict with:
+      - match_count: int
+      - avg_backhand_error_rate: float
+      - backhand_error_trend: list of (match_date, rate) pairs
+      - avg_forehand_error_rate: float
+      - forehand_error_trend: list of (match_date, rate) pairs
+      - avg_shot_speed_kmh_trend: list of (match_date, kmh)
+      - serve_fault_trend: list of (match_date, first_serve_pct)
+      - long_rally_error_trend: list of (match_date, rate)
+      - dominant_patterns: dict of pattern -> count_of_matches_dominant
+      - confirmed_weaknesses: list of {weakness, matches_count, avg_rate, trend}
+    """
+    history = get_player_match_history(player_id)
+    n = len(history)
+    if n == 0:
+        return {"match_count": 0}
+
+    def _trend(key: str, subkey: str) -> list[dict]:
+        out = []
+        for h in history:
+            val = h.get(key, {}).get(subkey)
+            if val is not None:
+                out.append({"date": h["match_date"], "label": h.get("match_label") or h["match_date"], "value": round(val, 3)})
+        return out
+
+    def _scalar_trend(key: str) -> list[dict]:
+        return [
+            {"date": h["match_date"], "label": h.get("match_label") or h["match_date"], "value": h.get(key)}
+            for h in history if h.get(key) is not None
+        ]
+
+    backhand_trend = _trend("error_rate_by_shot", "backhand")
+    forehand_trend = _trend("error_rate_by_shot", "forehand")
+    long_rally_trend = _trend("error_rate_by_rally", "7-9") or _trend("error_rate_by_rally", "10+")
+
+    # Dominant patterns: count how many matches each was dominant
+    pattern_counts: dict[str, int] = {}
+    for h in history:
+        dp = h.get("dominant_pattern")
+        if dp:
+            pattern_counts[dp] = pattern_counts.get(dp, 0) + 1
+
+    # Confirmed weaknesses: any stat that appears consistently across ≥60% of matches
+    confirmed_weaknesses = []
+    if backhand_trend:
+        avg_bh = sum(t["value"] for t in backhand_trend) / len(backhand_trend)
+        high_count = sum(1 for t in backhand_trend if t["value"] >= 0.3)
+        if avg_bh >= 0.25 or high_count >= max(1, round(len(backhand_trend) * 0.6)):
+            confirmed_weaknesses.append({
+                "weakness": "Backhand consistency",
+                "matches_count": len(backhand_trend),
+                "high_error_matches": high_count,
+                "avg_rate": round(avg_bh, 3),
+                "trend": backhand_trend,
+                "confirmed": high_count >= max(1, round(len(backhand_trend) * 0.6)),
+            })
+
+    if long_rally_trend:
+        avg_lr = sum(t["value"] for t in long_rally_trend) / len(long_rally_trend)
+        high_count = sum(1 for t in long_rally_trend if t["value"] >= 0.5)
+        if avg_lr >= 0.4:
+            confirmed_weaknesses.append({
+                "weakness": "Long rally endurance",
+                "matches_count": len(long_rally_trend),
+                "high_error_matches": high_count,
+                "avg_rate": round(avg_lr, 3),
+                "trend": long_rally_trend,
+                "confirmed": high_count >= max(1, round(len(long_rally_trend) * 0.6)),
+            })
+
+    # Serve trend
+    serve_trend = _scalar_trend("first_serve_pct")
+    if serve_trend:
+        avg_serve = sum(t["value"] for t in serve_trend) / len(serve_trend)
+        if avg_serve < 0.6:
+            confirmed_weaknesses.append({
+                "weakness": "First serve reliability",
+                "matches_count": len(serve_trend),
+                "high_error_matches": sum(1 for t in serve_trend if t["value"] < 0.6),
+                "avg_rate": round(1 - avg_serve, 3),
+                "trend": [{"date": t["date"], "label": t["label"], "value": round(1 - t["value"], 3)} for t in serve_trend],
+                "confirmed": sum(1 for t in serve_trend if t["value"] < 0.6) >= max(1, round(len(serve_trend) * 0.6)),
+            })
+
+    speed_trend = _scalar_trend("avg_shot_speed_kmh")
+    avg_speed = round(sum(t["value"] for t in speed_trend) / len(speed_trend), 1) if speed_trend else None
+
+    return {
+        "match_count": n,
+        "avg_shot_speed_kmh": avg_speed,
+        "shot_speed_trend": speed_trend,
+        "backhand_error_trend": backhand_trend,
+        "forehand_error_trend": forehand_trend,
+        "long_rally_error_trend": long_rally_trend,
+        "serve_fault_trend": serve_trend,
+        "dominant_patterns": pattern_counts,
+        "confirmed_weaknesses": confirmed_weaknesses,
+    }
 
 
 def get_full_status(job_id: str) -> Optional[dict]:

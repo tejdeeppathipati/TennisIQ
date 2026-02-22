@@ -370,6 +370,51 @@ export interface ResultsDataResponse {
   player_a_card: PlayerCard | null;
   player_b_card: PlayerCard | null;
   match_flow: MatchFlowData | null;
+  historical_insights?: HistoricalInsights | null;
+}
+
+export interface PersistentWeaknessInsight {
+  name: string;
+  baseline_rate_pct: number;
+  matches_triggered: number;
+  matches_with_data: number;
+  confirmed: boolean;
+}
+
+export interface PlayerHistoryInsights {
+  match_count: number;
+  baseline: {
+    backhand_error_rate_pct: number | null;
+    long_rally_error_rate_pct: number | null;
+    first_serve_pct: number | null;
+    avg_shot_speed_kmh: number | null;
+  };
+  current_vs_baseline: {
+    backhand_error_delta_pp: number | null;
+    long_rally_error_delta_pp: number | null;
+    first_serve_delta_pp: number | null;
+    avg_shot_speed_delta_kmh: number | null;
+  };
+  persistent_weaknesses: PersistentWeaknessInsight[];
+  summary: string[];
+}
+
+export interface HistoricalInsights {
+  enabled: boolean;
+  minimum_matches: number;
+  total_matches_considered: number;
+  player_a: PlayerHistoryInsights;
+  player_b: PlayerHistoryInsights;
+}
+
+export interface CoachNote {
+  id: number;
+  job_id: string;
+  point_idx: number;
+  timestamp_sec: number;
+  note_text: string;
+  player: "player_a" | "player_b";
+  created_at: string;
 }
 
 export interface Session {
