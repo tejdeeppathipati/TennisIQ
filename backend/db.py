@@ -33,7 +33,8 @@ def init_db() -> None:
                 iteration INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                error_message TEXT
+                error_message TEXT,
+                output_dir TEXT
             );
 
             CREATE TABLE IF NOT EXISTS decisions (
@@ -136,16 +137,24 @@ def init_db() -> None:
                 FOREIGN KEY (job_id) REFERENCES jobs(id)
             );
         """)
+        # Migration: add output_dir to jobs if missing (for date-time output directories)
+        cur = conn.execute("PRAGMA table_info(jobs)")
+        columns = [row[1] for row in cur.fetchall()]
+        if "output_dir" not in columns:
+            conn.execute("ALTER TABLE jobs ADD COLUMN output_dir TEXT")
 
 
 def create_job(footage_url: str, footage_type: str = "youtube", config: Optional[dict] = None) -> str:
     job_id = str(uuid.uuid4())
-    now = datetime.utcnow().isoformat()
+    now = datetime.utcnow()
+    # Output directory name: date and time for easy identification (e.g. 2026-02-22_01-18-42_abc12def)
+    output_dir = now.strftime("%Y-%m-%d_%H-%M-%S") + "_" + uuid.uuid4().hex[:8]
+    now_iso = now.isoformat()
     with get_connection() as conn:
         conn.execute(
-            """INSERT INTO jobs (id, status, stage, stage_description, footage_url, footage_type, config, created_at, updated_at)
-               VALUES (?, 'queued', 'queued', 'Pipeline queued, waiting for GPU provisioning', ?, ?, ?, ?, ?)""",
-            (job_id, footage_url, footage_type, json.dumps(config or {}), now, now)
+            """INSERT INTO jobs (id, status, stage, stage_description, footage_url, footage_type, config, created_at, updated_at, output_dir)
+               VALUES (?, 'queued', 'queued', 'Pipeline queued, waiting for GPU provisioning', ?, ?, ?, ?, ?, ?)""",
+            (job_id, footage_url, footage_type, json.dumps(config or {}), now_iso, now_iso, output_dir)
         )
     return job_id
 

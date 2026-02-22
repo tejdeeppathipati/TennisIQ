@@ -248,6 +248,91 @@ export interface ServePlacement {
   service_boxes: Record<string, { x_min: number; y_min: number; x_max: number; y_max: number }>;
 }
 
+export interface StatSummary {
+  mean?: number | null;
+  median?: number | null;
+  p90?: number | null;
+  p95?: number | null;
+  max?: number | null;
+}
+
+export interface AnalysisData {
+  meta?: {
+    job_id?: string | null;
+    fps?: number | null;
+    duration_sec?: number | null;
+    meters_per_unit?: number | null;
+    court?: { width_units: number; height_units: number };
+  };
+  quality?: {
+    frames_total?: number;
+    ball_coverage_pct?: number;
+    ball_projected_pct?: number;
+    homography_reliable_pct?: number;
+    player_visibility?: {
+      player_a_pct?: number;
+      player_b_pct?: number;
+      both_pct?: number;
+    };
+    events_total?: number;
+    points_total?: number;
+  };
+  serve?: {
+    zone_counts?: Record<string, number>;
+    fault_rate?: number | null;
+    depth_stats?: StatSummary | null;
+    width_stats?: StatSummary | null;
+    depth_samples_m?: number[];
+    width_samples_m?: number[];
+    sample_count?: number;
+  };
+  rally?: {
+    rally_hits?: number[];
+    rally_durations_sec?: number[];
+    end_reason_counts?: Record<string, number>;
+    tempo_stats?: {
+      mean_hits_per_sec?: number | null;
+      mean_inter_hit_sec?: number | null;
+      p95_inter_hit_sec?: number | null;
+    };
+  };
+  errors?: {
+    out_count?: number;
+    out_distance_stats?: StatSummary | null;
+    error_positions?: { x: number | null; y: number | null }[];
+  };
+  players?: {
+    player_a?: {
+      distance_m?: number;
+      speed_stats?: StatSummary | null;
+      zone_time_pct?: Record<string, number> | null;
+    } | null;
+    player_b?: {
+      distance_m?: number;
+      speed_stats?: StatSummary | null;
+      zone_time_pct?: Record<string, number> | null;
+    } | null;
+  };
+  ball?: {
+    speed_stats?: StatSummary | null;
+    accel_stats?: { mean?: number | null; p95_abs?: number | null } | null;
+    speed_samples_m_s?: number[];
+    hit_speed_deltas?: { t?: number | null; before?: number | null; after?: number | null; delta?: number | null }[];
+  };
+  events?: {
+    timeline?: {
+      t?: number | null;
+      type?: string | null;
+      side?: string | null;
+      in_out?: string | null;
+      speed_before_m_s?: number | null;
+      speed_after_m_s?: number | null;
+      direction_change_deg?: number | null;
+      player?: string | null;
+    }[];
+  };
+}
+
 export interface HeatmapData {
   grid: number[][];
   x_edges: number[];
@@ -275,6 +360,7 @@ export interface ResultsDataResponse {
   error_heatmap: HeatmapData | null;
   player_a_heatmap: HeatmapData | null;
   player_b_heatmap: HeatmapData | null;
+  analysis?: AnalysisData | null;
   stats: Record<string, unknown> | null;
   clips: { filename: string; url: string }[];
   downloads: DownloadItem[];

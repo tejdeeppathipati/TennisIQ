@@ -8,7 +8,7 @@ interface Props {
   analytics: AnalyticsData | null;
 }
 
-function ShotDistPie({ counts, label }: { counts: Record<string, number>; label: string }) {
+function ShotDistPie({ counts }: { counts: Record<string, number> }) {
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   if (total === 0) return null;
 
@@ -20,15 +20,13 @@ function ShotDistPie({ counts, label }: { counts: Record<string, number>; label:
     unknown: "#374151",
   };
 
-  let offset = 0;
-  const segments = Object.entries(counts)
-    .sort(([, a], [, b]) => b - a)
-    .map(([type, count]) => {
-      const pct = (count / total) * 100;
-      const seg = { type, count, pct, offset, color: colors[type] || "#6b7280" };
-      offset += pct;
-      return seg;
-    });
+  const segments: { type: string; count: number; pct: number; offset: number; color: string }[] = [];
+  let runningOffset = 0;
+  for (const [type, count] of Object.entries(counts).sort(([, a], [, b]) => b - a)) {
+    const pct = (count / total) * 100;
+    segments.push({ type, count, pct, offset: runningOffset, color: colors[type] || "#6b7280" });
+    runningOffset += pct;
+  }
 
   return (
     <div className="flex items-center gap-4">
@@ -202,7 +200,7 @@ function SinglePlayerCard({ card, analytics, playerKey }: {
       {playerAnalytics && Object.keys(playerAnalytics.shot_type_counts).length > 0 && (
         <div className="space-y-2">
           <h5 className="text-xs font-medium text-zinc-500 uppercase tracking-wider">Shot Distribution</h5>
-          <ShotDistPie counts={playerAnalytics.shot_type_counts} label={name} />
+          <ShotDistPie counts={playerAnalytics.shot_type_counts} />
         </div>
       )}
 

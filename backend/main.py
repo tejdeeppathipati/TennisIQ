@@ -19,6 +19,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, HttpUrl
 from dotenv import load_dotenv
 
+try:
+    from analysis import build_analysis, write_analysis_bundle
+except ModuleNotFoundError:
+    from backend.analysis import build_analysis, write_analysis_bundle
+
 import db
 import modal_runner
 
@@ -618,6 +623,20 @@ async def get_results_data(job_id: str):
     data["points"] = _load_json("points.json") or []
     data["events"] = _load_json("events.json") or []
     data["stats"] = _load_json("stats.json")
+
+    analysis = _load_json("analysis.json")
+    if analysis is None:
+        analysis = _load_json("analysis/analysis.json")
+    if analysis is None:
+        try:
+            analysis = build_analysis(run_dir, job_id=job_id)
+            if analysis is not None:
+                (run_dir / "analysis.json").write_text(json.dumps(analysis, indent=2))
+        except Exception as exc:
+            logger.warning("Failed to build analysis.json: %s", exc)
+            analysis = None
+    data["analysis"] = analysis
+    write_analysis_bundle(run_dir, analysis)
 
     raw_video_path = run_dir / "raw_video.mp4"
     if raw_video_path.exists():

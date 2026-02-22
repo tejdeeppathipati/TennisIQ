@@ -33,9 +33,12 @@ export default function SideBySidePlayer({ rawVideoUrl, overlayVideoUrl, onTimeU
   useEffect(() => {
     if (seekTo != null && seekTo >= 0) {
       syncVideos(seekTo);
-      setCurrentTime(seekTo);
+      requestAnimationFrame(() => {
+        setCurrentTime(seekTo);
+      });
+      onTimeUpdate?.(seekTo);
     }
-  }, [seekTo, syncVideos]);
+  }, [seekTo, syncVideos, onTimeUpdate]);
 
   const handleTimeUpdate = () => {
     const ref = overlayRef.current ?? rawRef.current;

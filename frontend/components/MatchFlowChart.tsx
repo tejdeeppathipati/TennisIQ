@@ -87,50 +87,50 @@ function RallyLengthChart({ data }: { data: Record<string, number> }) {
   );
 }
 
+const SHOT_COLORS: Record<string, string> = {
+  forehand: "bg-blue-500",
+  backhand: "bg-amber-500",
+  serve: "bg-emerald-500",
+  neutral: "bg-zinc-600",
+};
+
+function PatternBar({ patterns, label, isA }: { patterns: PatternItem[]; label: string; isA: boolean }) {
+  const top = patterns.slice(0, 4);
+  const maxPct = Math.max(...top.map((p) => p.pct), 1);
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <span className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${isA ? "bg-blue-500/20 text-blue-400" : "bg-orange-500/20 text-orange-400"}`}>
+          {isA ? "A" : "B"}
+        </span>
+        <span className="text-xs text-zinc-400 font-medium">{label}</span>
+      </div>
+      <div className="space-y-1.5">
+        {top.map((p) => (
+          <div key={p.pattern} className="flex items-center gap-2">
+            <div className="w-20 text-[10px] text-zinc-500 capitalize truncate">{p.shot_type}</div>
+            <div className="flex-1 h-4 bg-zinc-800 rounded-full overflow-hidden relative">
+              <div
+                className={`h-full rounded-full ${SHOT_COLORS[p.shot_type] || "bg-zinc-600"} transition-all`}
+                style={{ width: `${(p.pct / maxPct) * 100}%`, opacity: 0.7 }}
+              />
+              <span className="absolute inset-0 flex items-center pl-2 text-[9px] font-medium text-white/80">
+                {p.direction.replace(/_/g, " ")}
+              </span>
+            </div>
+            <span className="w-10 text-right text-[10px] text-zinc-400 font-mono">{p.pct.toFixed(0)}%</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function ShotPatternDominance({ data }: { data: Record<string, PatternItem[]> }) {
   const aPatterns = data.player_a ?? [];
   const bPatterns = data.player_b ?? [];
   if (aPatterns.length === 0 && bPatterns.length === 0) return null;
-
-  const shotColors: Record<string, string> = {
-    forehand: "bg-blue-500",
-    backhand: "bg-amber-500",
-    serve: "bg-emerald-500",
-    neutral: "bg-zinc-600",
-  };
-
-  function PatternBar({ patterns, label, isA }: { patterns: PatternItem[]; label: string; isA: boolean }) {
-    const top = patterns.slice(0, 4);
-    const maxPct = Math.max(...top.map((p) => p.pct), 1);
-
-    return (
-      <div className="space-y-2">
-        <div className="flex items-center gap-2">
-          <span className={`w-5 h-5 rounded text-[10px] font-bold flex items-center justify-center ${isA ? "bg-blue-500/20 text-blue-400" : "bg-orange-500/20 text-orange-400"}`}>
-            {isA ? "A" : "B"}
-          </span>
-          <span className="text-xs text-zinc-400 font-medium">{label}</span>
-        </div>
-        <div className="space-y-1.5">
-          {top.map((p) => (
-            <div key={p.pattern} className="flex items-center gap-2">
-              <div className="w-20 text-[10px] text-zinc-500 capitalize truncate">{p.shot_type}</div>
-              <div className="flex-1 h-4 bg-zinc-800 rounded-full overflow-hidden relative">
-                <div
-                  className={`h-full rounded-full ${shotColors[p.shot_type] || "bg-zinc-600"} transition-all`}
-                  style={{ width: `${(p.pct / maxPct) * 100}%`, opacity: 0.7 }}
-                />
-                <span className="absolute inset-0 flex items-center pl-2 text-[9px] font-medium text-white/80">
-                  {p.direction.replace(/_/g, " ")}
-                </span>
-              </div>
-              <span className="w-10 text-right text-[10px] text-zinc-400 font-mono">{p.pct.toFixed(0)}%</span>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="space-y-3">

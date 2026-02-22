@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, use } from "react";
+import Link from "next/link";
 import { getStatus, getResultsData } from "@/lib/api";
 import type {
   StatusResponse,
@@ -12,6 +13,7 @@ import type {
   DownloadItem,
   PlayerCard,
   AnalyticsData,
+  AnalysisData,
   MatchFlowData,
 } from "@/lib/types";
 import { STAGE_LABELS } from "@/lib/types";
@@ -27,9 +29,10 @@ import ServePlacementChart from "@/components/ServePlacementChart";
 import HeatmapViewer from "@/components/HeatmapViewer";
 import HighlightClips from "@/components/HighlightClips";
 import DownloadPanel from "@/components/DownloadPanel";
+import AnalysisDashboard from "@/components/AnalysisDashboard";
 
 const POLL_INTERVAL = 5000;
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8002";
+const API_URL = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/+$/, "") || "/backend";
 
 export default function ResultsPage({
   params,
@@ -90,12 +93,12 @@ export default function ResultsPage({
         <div className="bg-red-950 border border-red-800 rounded-2xl p-8 max-w-md text-center">
           <h2 className="text-xl font-bold text-white mb-2">Something went wrong</h2>
           <p className="text-red-300 text-sm">{error}</p>
-          <a
+          <Link
             href="/"
             className="mt-6 inline-block px-6 py-3 bg-zinc-800 hover:bg-zinc-700 rounded-xl text-white text-sm transition-colors"
           >
             Start over
-          </a>
+          </Link>
         </div>
       </div>
     );
@@ -137,18 +140,19 @@ export default function ResultsPage({
   const playerBCard: PlayerCard | null = data?.player_b_card ?? null;
   const analyticsData: AnalyticsData | null = data?.analytics ?? null;
   const matchFlow: MatchFlowData | null = data?.match_flow ?? null;
+  const analysisBundle: AnalysisData | null = data?.analysis ?? null;
 
   return (
     <div className="min-h-screen bg-black text-white">
       <header className="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
-        <a href="/" className="flex items-center gap-2">
+        <Link href="/" className="flex items-center gap-2">
           <div className="w-8 h-8 rounded-xl bg-green-600 flex items-center justify-center text-sm font-black text-white">
             T
           </div>
           <span className="text-white font-bold">
             Tennis<span className="text-green-400">IQ</span>
           </span>
-        </a>
+        </Link>
         <div className="flex items-center gap-2 text-sm">
           <StatusBadge status={status.status} />
           <span className="text-zinc-500 font-mono text-xs">{jobId.slice(0, 8)}</span>
@@ -191,6 +195,11 @@ export default function ResultsPage({
             analytics={analyticsData}
             matchFlow={matchFlow}
           />
+        )}
+
+        {/* Priority 3.5: Analysis Dashboard (quality, serve, rally, errors charts) */}
+        {isComplete && analysisBundle && (
+          <AnalysisDashboard analysis={analysisBundle} />
         )}
 
         {/* Priority 4: Enhanced Coaching Cards */}

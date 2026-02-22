@@ -6,13 +6,35 @@ import type {
   Session,
 } from "./types";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8002";
+const ENV_API_URL = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/+$/, "");
+const API_BASE = ENV_API_URL || "/backend";
+
+export async function getApiBaseUrl(): Promise<string> {
+  return API_BASE;
+}
+
+function ensureAbsoluteUrl(baseUrl: string, path: string): string {
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const safePath = path.startsWith("/") ? path : `/${path}`;
+  return `${baseUrl}${safePath}`;
+}
 
 async function apiFetch<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(`${API_URL}${path}`, {
-    headers: { "Content-Type": "application/json", ...options?.headers },
-    ...options,
-  });
+  const apiUrl = API_BASE;
+  let res: Response;
+  try {
+    res = await fetch(ensureAbsoluteUrl(apiUrl, path), {
+      headers: { "Content-Type": "application/json", ...options?.headers },
+      ...options,
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Cannot reach backend via ${apiUrl}. Start backend with: cd backend && python -m uvicorn main:app --host 127.0.0.1 --port 8002 (${message})`,
+    );
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`API error ${res.status}: ${text}`);
@@ -30,10 +52,19 @@ export async function ingestURL(url: string): Promise<{ job_id: string; status: 
 export async function ingestUpload(file: File): Promise<{ job_id: string; status: string }> {
   const formData = new FormData();
   formData.append("file", file);
-  const res = await fetch(`${API_URL}/ingest/upload`, {
-    method: "POST",
-    body: formData,
-  });
+  const apiUrl = API_BASE;
+  let res: Response;
+  try {
+    res = await fetch(ensureAbsoluteUrl(apiUrl, "/ingest/upload"), {
+      method: "POST",
+      body: formData,
+    });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Cannot reach backend via ${apiUrl}. Start backend with: cd backend && python -m uvicorn main:app --host 127.0.0.1 --port 8002 (${message})`,
+    );
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`Upload error ${res.status}: ${text}`);

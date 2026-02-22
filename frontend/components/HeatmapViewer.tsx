@@ -15,7 +15,8 @@ function HeatmapGrid({ data, title, colorFn }: { data: HeatmapData; title: strin
   if (!data.grid.length) {
     return (
       <div className="rounded-lg bg-zinc-900 border border-zinc-800 p-3 text-center">
-        <p className="text-zinc-600 text-[10px]">{title}: no data</p>
+        <p className="text-zinc-500 text-[11px]">{title}</p>
+        <p className="text-zinc-600 text-[10px]">No positions recorded — player or bounce not detected reliably.</p>
       </div>
     );
   }
