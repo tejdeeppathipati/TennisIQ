@@ -10,6 +10,9 @@ import type {
   ServePlacement,
   HeatmapData,
   DownloadItem,
+  PlayerCard,
+  AnalyticsData,
+  MatchFlowData,
 } from "@/lib/types";
 import { STAGE_LABELS } from "@/lib/types";
 import ProgressTracker from "@/components/ProgressTracker";
@@ -17,6 +20,9 @@ import CheckpointReview from "@/components/CheckpointReview";
 import SideBySidePlayer from "@/components/SideBySidePlayer";
 import PointTimeline from "@/components/PointTimeline";
 import CoachingCards from "@/components/CoachingCards";
+import PlayerCardView from "@/components/PlayerCardView";
+import WeaknessReport from "@/components/WeaknessReport";
+import MatchFlowChart from "@/components/MatchFlowChart";
 import ServePlacementChart from "@/components/ServePlacementChart";
 import HeatmapViewer from "@/components/HeatmapViewer";
 import HighlightClips from "@/components/HighlightClips";
@@ -127,6 +133,11 @@ export default function ResultsPage({
   }));
   const clipBaseUrl = `${API_URL}/outputs/${jobId}/clips`;
 
+  const playerACard: PlayerCard | null = data?.player_a_card ?? null;
+  const playerBCard: PlayerCard | null = data?.player_b_card ?? null;
+  const analyticsData: AnalyticsData | null = data?.analytics ?? null;
+  const matchFlow: MatchFlowData | null = data?.match_flow ?? null;
+
   return (
     <div className="min-h-screen bg-black text-white">
       <header className="border-b border-zinc-800 px-6 py-4 flex items-center justify-between">
@@ -157,6 +168,40 @@ export default function ResultsPage({
 
         {isReview && <CheckpointReview jobId={jobId} onComplete={fetchStatus} />}
 
+        {/* Priority 1: Player Cards (the real product) */}
+        {isComplete && (playerACard || playerBCard) && (
+          <PlayerCardView
+            playerACard={playerACard}
+            playerBCard={playerBCard}
+            analytics={analyticsData}
+          />
+        )}
+
+        {/* Priority 2: Weakness Reports */}
+        {isComplete && (playerACard || playerBCard) && (
+          <WeaknessReport
+            playerACard={playerACard}
+            playerBCard={playerBCard}
+          />
+        )}
+
+        {/* Priority 3: Match Flow */}
+        {isComplete && (analyticsData || matchFlow) && (
+          <MatchFlowChart
+            analytics={analyticsData}
+            matchFlow={matchFlow}
+          />
+        )}
+
+        {/* Priority 4: Enhanced Coaching Cards */}
+        {isComplete && coachingCards.length > 0 && (
+          <CoachingCards
+            cards={coachingCards}
+            onSeekToPoint={handleSeekToPoint}
+          />
+        )}
+
+        {/* Demo features: Video, Timeline, Visualizations */}
         {isComplete && (
           <SideBySidePlayer
             rawVideoUrl={rawVideoUrl}
@@ -172,11 +217,6 @@ export default function ResultsPage({
               <PointTimeline
                 points={points}
                 currentTime={currentTime}
-                onSeekToPoint={handleSeekToPoint}
-              />
-
-              <CoachingCards
-                cards={coachingCards}
                 onSeekToPoint={handleSeekToPoint}
               />
 
@@ -199,7 +239,7 @@ export default function ResultsPage({
 
               {data?.stats && (
                 <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 space-y-3">
-                  <h3 className="text-sm font-semibold text-zinc-300">Match Stats</h3>
+                  <h3 className="text-sm font-semibold text-zinc-300">Detection Stats</h3>
                   <div className="grid grid-cols-2 gap-2 text-xs">
                     <div className="text-zinc-500">Points detected</div>
                     <div className="text-zinc-300">{points.length}</div>
@@ -209,32 +249,13 @@ export default function ResultsPage({
                         ? ((data.stats as Record<string, Record<string, number>>).events?.total ?? 0)
                         : data.events?.length ?? 0}
                     </div>
+                    <div className="text-zinc-500">Total shots</div>
+                    <div className="text-zinc-300">{data.shots?.length ?? 0}</div>
                     <div className="text-zinc-500">Avg rally hits</div>
                     <div className="text-zinc-300">
                       {(data.stats as Record<string, Record<string, number>>)?.points?.avg_rally_hits?.toFixed(1) ?? "-"}
                     </div>
-                    <div className="text-zinc-500">Avg confidence</div>
-                    <div className="text-zinc-300">
-                      {(data.stats as Record<string, Record<string, number>>)?.points?.avg_confidence
-                        ? `${((data.stats as Record<string, Record<string, number>>).points.avg_confidence * 100).toFixed(0)}%`
-                        : "-"}
-                    </div>
-                    <div className="text-zinc-500">Coach reviews</div>
-                    <div className="text-zinc-300">{data.point_feedback?.length ?? 0}</div>
                   </div>
-                </div>
-              )}
-
-              {data?.stats && (data.stats as Record<string, unknown>)?.insights && (
-                <div className="rounded-xl bg-zinc-900 border border-zinc-800 p-4 space-y-2">
-                  <h3 className="text-sm font-semibold text-zinc-300">Insights</h3>
-                  <ul className="space-y-1.5">
-                    {((data.stats as Record<string, string[]>).insights).map((insight, i) => (
-                      <li key={i} className="text-xs text-zinc-400 leading-relaxed">
-                        {insight}
-                      </li>
-                    ))}
-                  </ul>
                 </div>
               )}
             </div>

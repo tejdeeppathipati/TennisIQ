@@ -36,7 +36,7 @@ TennisIQ/
 - [Modal account](https://modal.com) with API token
 - Model checkpoints in `checkpoints/` directory:
   - `court_resnet/keypoints_model.pth`
-  - `ball_yolo5/yolo5_last.pt`
+  - `ball_yolo5/models_best.pt`
 
 ## Setup
 

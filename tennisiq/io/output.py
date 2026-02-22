@@ -58,6 +58,10 @@ def write_outputs(
     timing: dict,
     events: list | None = None,
     points: list | None = None,
+    shot_events: list | None = None,
+    shot_directions: dict | None = None,
+    analytics=None,
+    coaching=None,
 ) -> dict:
     """
     Write all structured output files for a pipeline run.
@@ -93,9 +97,21 @@ def write_outputs(
     if points is not None:
         paths["points"] = _write_points(base, points)
         paths["serve_placement"] = _write_serve_placement(base, points)
-        paths["coaching_cards"] = _write_coaching_cards(base, points)
     if player_results:
         paths["player_heatmaps"] = _write_player_heatmaps(base, player_results)
+
+    # ── New analytics outputs ─────────────────────────────────────────────
+    if shot_events is not None:
+        paths["shots"] = _write_shots(base, shot_events, shot_directions or {})
+    if analytics is not None:
+        paths["analytics"] = _write_analytics(base, analytics)
+    if coaching is not None:
+        paths["coaching_cards"] = _write_enhanced_coaching_cards(base, coaching)
+        paths["player_a_card"] = _write_player_card(base, coaching, "player_a")
+        paths["player_b_card"] = _write_player_card(base, coaching, "player_b")
+        paths["match_flow"] = _write_match_flow(base, coaching)
+    elif points is not None:
+        paths["coaching_cards"] = _write_coaching_cards(base, points)
 
     logger.info(f"Outputs written to {base}")
     return paths
@@ -114,7 +130,7 @@ def _write_run_metadata(base, job_id, video_path, fps, start_sec, end_sec, timin
         },
         "models": {
             "court": {"name": "ResNet50 Keypoint Regression", "checkpoint": "checkpoints/court_resnet/keypoints_model.pth", "input_size": "224x224", "output": "28 values → 14 (x,y) keypoints"},
-            "ball": {"name": "YOLOv5L6u (tennis ball)", "checkpoint": "checkpoints/ball_yolo5/yolo5_last.pt", "input_size": "640", "output": "bbox + confidence per frame"},
+            "ball": {"name": "YOLOv5L6u (tennis ball)", "checkpoint": "checkpoints/ball_yolo5/models_best.pt", "input_size": "640", "output": "bbox + confidence per frame"},
             "player": {"name": "YOLOv8n", "checkpoint": "yolov8n.pt (auto-download)", "tracker": "ByteTrack"},
         },
         "config": {
@@ -698,3 +714,92 @@ def _generate_coaching_suggestion(pt) -> str:
         suggestions.append("Solid point. Continue working on consistency and shot placement.")
 
     return " ".join(suggestions)
+
+
+# ─── New Analytics Output Writers ─────────────────────────────────────────────
+
+def _write_shots(base, shot_events, shot_directions):
+    """Write shots.json with all detected shot events."""
+    data = []
+    for s in shot_events:
+        data.append({
+            "frame_idx": s.frame_idx,
+            "timestamp_sec": s.timestamp_sec,
+            "owner": s.owner,
+            "ball_court_xy": list(s.ball_court_xy),
+            "shot_type": s.shot_type,
+            "shot_type_confidence": _safe_round(s.shot_type_confidence, 3),
+            "ball_direction_deg": _safe_round(s.ball_direction_deg, 1),
+            "ball_direction_label": shot_directions.get(s.frame_idx, "unknown"),
+            "speed_m_s": _safe_round(s.speed_m_s, 2),
+            "court_side": s.court_side,
+            "ownership_method": s.ownership_method,
+        })
+
+    path = str(base / "shots.json")
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    logger.info(f"Wrote {len(data)} shots to {path}")
+    return path
+
+
+def _write_analytics(base, analytics):
+    """Write analytics.json with full match analytics."""
+    from tennisiq.analytics.match_analytics import analytics_to_dict
+
+    data = analytics_to_dict(analytics)
+    path = str(base / "analytics.json")
+    with open(path, "w") as f:
+        json.dump(data, f, indent=2)
+    logger.info(f"Wrote analytics to {path}")
+    return path
+
+
+def _write_enhanced_coaching_cards(base, coaching):
+    """Write coaching_cards.json from coaching intelligence engine."""
+    from tennisiq.analytics.coaching_intelligence import coaching_to_dict
+
+    data = coaching_to_dict(coaching)
+    cards = data.get("coaching_cards", [])
+
+    path = str(base / "coaching_cards.json")
+    with open(path, "w") as f:
+        json.dump(cards, f, indent=2)
+    logger.info(f"Wrote {len(cards)} enhanced coaching cards to {path}")
+    return path
+
+
+def _write_player_card(base, coaching, player_label):
+    """Write player_a_card.json or player_b_card.json."""
+    from tennisiq.analytics.coaching_intelligence import coaching_to_dict
+
+    data = coaching_to_dict(coaching)
+    card_key = f"{player_label}_card"
+    weakness_key = f"{player_label}_weaknesses"
+
+    card_data = {
+        "card": data.get(card_key, {}),
+        "weaknesses": data.get(weakness_key, {}),
+    }
+
+    path = str(base / f"{player_label}_card.json")
+    with open(path, "w") as f:
+        json.dump(card_data, f, indent=2)
+    logger.info(f"Wrote {player_label} card to {path}")
+    return path
+
+
+def _write_match_flow(base, coaching):
+    """Write match_flow.json with flow insights."""
+    from tennisiq.analytics.coaching_intelligence import coaching_to_dict
+
+    data = coaching_to_dict(coaching)
+    flow_data = {
+        "insights": data.get("match_flow_insights", []),
+    }
+
+    path = str(base / "match_flow.json")
+    with open(path, "w") as f:
+        json.dump(flow_data, f, indent=2)
+    logger.info(f"Wrote match flow to {path}")
+    return path

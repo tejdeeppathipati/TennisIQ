@@ -209,7 +209,7 @@ Over a season it returns 30–60 hours of coaching staff time and materially imp
 
 | ID | Requirement |
 |---|---|
-| FR-10 | The system shall load the YOLOv5 tennis ball detection model from the pretrained checkpoint (yolo5_last.pt) at pipeline start and run ball detection inference on every frame. |
+| FR-10 | The system shall load the YOLOv5 tennis ball detection model from the pretrained checkpoint (models_best.pt) at pipeline start and run ball detection inference on every frame. |
 | FR-11 | The system shall postprocess YOLOv5 bounding box outputs to extract ball center coordinates per frame, applying confidence thresholding and single-best-detection selection. |
 | FR-12 | The system shall remove outlier detections where inter-frame ball distance exceeds a maximum threshold. |
 | FR-13 | The system shall fill gaps in the ball track via linear interpolation within continuous sub-tracks, preserving None values across large gaps where interpolation is unreliable. |
@@ -392,7 +392,7 @@ Over a season it returns 30–60 hours of coaching staff time and materially imp
               |
 +-------------+----------+
 |  PRETRAINED CHECKPOINTS |
-|  checkpoints/yolo5_last.pt       YOLOv5 ball     |
+|  checkpoints/models_best.pt       YOLOv5 ball     |
 |  checkpoints/keypoints_model.pth ResNet50 court  |
 +------------------------+
 ```
@@ -503,7 +503,7 @@ Coach submits → POST /checkpoint
 | Backend API | FastAPI (Python) | Wraps existing Python pipeline directly |
 | Inference | Modal T4 GPU | Serverless GPU inference — no persistent infra |
 | Job State | SQLite | Instant reads/writes, zero infra setup |
-| Ball Tracking | YOLOv5 (yolo5_last.pt, pretrained) | Fine-tuned for tennis ball, handles motion blur |
+| Ball Tracking | YOLOv5 (models_best.pt, pretrained) | Fine-tuned for tennis ball, handles motion blur |
 | Court Detection | ResNet50 keypoint regression (keypoints_model.pth, pretrained) | 14 keypoints → homography → real court coordinates |
 | Player Detection | YOLOv8n + court boundary filter | General detector constrained by court geometry |
 | Event Detection | Physics-based + heuristic scoring | Bounce/hit from kinematics, not pixel patterns |
@@ -570,7 +570,7 @@ frontend/
 
 checkpoints/
   keypoints_model.pth              # ResNet50 court keypoints
-  yolo5_last.pt                    # YOLOv5 tennis ball
+  models_best.pt                    # YOLOv5 tennis ball
 
 outputs/<run_id>/
   overlay.mp4                      # Annotated video for sync player

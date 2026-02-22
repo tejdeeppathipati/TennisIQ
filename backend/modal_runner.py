@@ -76,15 +76,31 @@ def _run_segment_on_modal(
     start_sec: float,
     end_sec: float,
 ) -> dict:
-    """Run a single 10-second segment on Modal T4 GPU. Raises on failure."""
-    import modal
-    fn = modal.Function.from_name("tennisiq-court", "run_court_and_ball")
-    return fn.remote(
-        video_bytes=video_bytes,
-        fps=fps,
-        start_sec=start_sec,
-        end_sec=end_sec,
-    )
+    """Run a single 10-second segment on Modal T4 GPU, with local CPU fallback."""
+    try:
+        import modal
+        fn = modal.Function.from_name("tennisiq-court", "run_court_and_ball")
+        return fn.remote(
+            video_bytes=video_bytes,
+            fps=fps,
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
+    except Exception as modal_err:
+        logger.warning(f"Modal unavailable ({modal_err}), running locally on CPU...")
+        import sys
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        os.environ.setdefault("TENNISIQ_CHECKPOINT_ROOT",
+                              os.path.join(project_root, "checkpoints"))
+        if project_root not in sys.path:
+            sys.path.insert(0, project_root)
+        from tennisiq.modal_court import run_court_and_ball
+        return run_court_and_ball.local(
+            video_bytes=video_bytes,
+            fps=fps,
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
 
 
 # ── Segment result accumulator ────────────────────────────────────────────────
@@ -97,11 +113,16 @@ class ResultAccumulator:
         self.all_events: list = []
         self.all_points: list = []
         self.all_coaching_cards: list = []
+        self.all_shots: list = []
         self.all_frames_jsonl: list[str] = []
         self.overlay_parts: list[bytes] = []
         self.clip_counter = 0
         self.latest_stats: dict = {}
         self.latest_run: dict = {}
+        self.latest_analytics: dict = {}
+        self.latest_player_a_card: dict = {}
+        self.latest_player_b_card: dict = {}
+        self.latest_match_flow: dict = {}
         self.heatmap_accum: dict[str, list] = {}
         self.timeseries_accum: dict[str, list] = {}
 
@@ -139,6 +160,40 @@ class ResultAccumulator:
                     items = json.loads(content)
                     if isinstance(items, list):
                         self.all_coaching_cards.extend(items)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            elif fname == "shots.json":
+                try:
+                    items = json.loads(content)
+                    if isinstance(items, list):
+                        for s in items:
+                            s["_segment"] = seg_idx
+                        self.all_shots.extend(items)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            elif fname == "analytics.json":
+                try:
+                    self.latest_analytics = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            elif fname == "player_a_card.json":
+                try:
+                    self.latest_player_a_card = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            elif fname == "player_b_card.json":
+                try:
+                    self.latest_player_b_card = json.loads(content)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+            elif fname == "match_flow.json":
+                try:
+                    self.latest_match_flow = json.loads(content)
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -227,8 +282,19 @@ class ResultAccumulator:
         _reindex_cards(self.all_coaching_cards, self.all_points)
         _write_json(self.out_dir / "coaching_cards.json", self.all_coaching_cards)
 
+        _write_json(self.out_dir / "shots.json", self.all_shots)
+
         stats = self._build_merged_stats(fps, duration, n_segments, succeeded)
         _write_json(self.out_dir / "stats.json", stats)
+
+        if self.latest_analytics:
+            _write_json(self.out_dir / "analytics.json", self.latest_analytics)
+        if self.latest_player_a_card:
+            _write_json(self.out_dir / "player_a_card.json", self.latest_player_a_card)
+        if self.latest_player_b_card:
+            _write_json(self.out_dir / "player_b_card.json", self.latest_player_b_card)
+        if self.latest_match_flow:
+            _write_json(self.out_dir / "match_flow.json", self.latest_match_flow)
 
         run_info = self.latest_run or {}
         run_info["segments_total"] = n_segments
@@ -334,6 +400,245 @@ def _reindex_cards(cards: list, points: list):
         c["point_idx"] = i
 
 
+# ── Post-merge analytics recomputation ────────────────────────────────────────
+
+def _compute_post_merge_analytics(out_dir: Path, fps: float):
+    """
+    Recompute shot detection, match analytics, and coaching intelligence
+    from merged output files. Runs locally after segment merging so analytics
+    are available even when the Modal cloud function uses an older code version.
+    """
+    try:
+        from tennisiq.cv.ball.inference import BallPhysics
+        from tennisiq.cv.players.inference import PlayerDetection, FramePlayers
+        from tennisiq.analytics.events import TennisEvent
+        from tennisiq.analytics.points import TennisPoint
+        from tennisiq.analytics.shots import classify_shot_direction, ShotEvent
+        from tennisiq.analytics.match_analytics import compute_match_analytics, analytics_to_dict
+        from tennisiq.analytics.coaching_intelligence import generate_coaching_intelligence, coaching_to_dict
+    except ImportError as e:
+        logger.warning(f"Cannot import analytics modules for post-merge computation: {e}")
+        return
+
+    frames_path = out_dir / "frames.jsonl"
+    events_path = out_dir / "events.json"
+    points_path = out_dir / "points.json"
+
+    if not frames_path.exists():
+        logger.warning("No frames.jsonl for post-merge analytics")
+        return
+
+    logger.info("Running post-merge analytics recomputation...")
+
+    # Reconstruct ball_physics from frames.jsonl
+    ball_physics: list[BallPhysics] = []
+    player_results: list[FramePlayers] = []
+
+    for line in frames_path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            f = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        ball = f.get("ball", {})
+        pxy = ball.get("pixel_xy")
+        cxy = ball.get("court_xy")
+        ball_physics.append(BallPhysics(
+            frame_idx=f.get("frame_idx", len(ball_physics)),
+            pixel_xy=(pxy[0], pxy[1]) if pxy else (None, None),
+            court_xy=(cxy[0], cxy[1]) if cxy else (None, None),
+            speed_m_per_s=ball.get("speed_m_s"),
+            accel_m_per_s2=ball.get("accel_m_s2"),
+        ))
+
+        players = f.get("players", {})
+        pa_data = players.get("player_a")
+        pb_data = players.get("player_b")
+        pa = None
+        pb = None
+        if pa_data and isinstance(pa_data, dict):
+            fc = pa_data.get("foot_court")
+            if fc:
+                pa = PlayerDetection(
+                    bbox=(0, 0, 0, 0),
+                    confidence=pa_data.get("confidence", 0.5),
+                    track_id=None,
+                    foot_pixel=(0, 0),
+                    foot_court=(fc[0], fc[1]),
+                    inside_court=True,
+                )
+        if pb_data and isinstance(pb_data, dict):
+            fc = pb_data.get("foot_court")
+            if fc:
+                pb = PlayerDetection(
+                    bbox=(0, 0, 0, 0),
+                    confidence=pb_data.get("confidence", 0.5),
+                    track_id=None,
+                    foot_pixel=(0, 0),
+                    foot_court=(fc[0], fc[1]),
+                    inside_court=True,
+                )
+        player_results.append(FramePlayers(
+            frame_idx=f.get("frame_idx", len(player_results)),
+            all_detections=[d for d in [pa, pb] if d],
+            player_a=pa,
+            player_b=pb,
+        ))
+
+    if len(ball_physics) < 4:
+        logger.warning(f"Too few frames ({len(ball_physics)}) for shot detection")
+        return
+
+    # Reconstruct events
+    events_list: list[TennisEvent] = []
+    if events_path.exists():
+        try:
+            raw_events = json.loads(events_path.read_text(encoding="utf-8"))
+            for e in raw_events:
+                events_list.append(TennisEvent(
+                    event_type=e["event_type"],
+                    frame_idx=e["frame_idx"],
+                    timestamp_sec=e["timestamp_sec"],
+                    court_xy=tuple(e["court_xy"]),
+                    speed_before_m_s=e.get("speed_before_m_s"),
+                    speed_after_m_s=e.get("speed_after_m_s"),
+                    direction_change_deg=e.get("direction_change_deg"),
+                    score=e.get("score", 0.5),
+                    player=e.get("player"),
+                    player_distance=e.get("player_distance"),
+                    in_out=e.get("in_out"),
+                    court_side=e.get("court_side"),
+                ))
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning(f"Failed to parse events.json: {e}")
+
+    # Reconstruct points
+    points_list: list[TennisPoint] = []
+    if points_path.exists():
+        try:
+            raw_points = json.loads(points_path.read_text(encoding="utf-8"))
+            for p in raw_points:
+                fb_xy = p.get("first_bounce_court_xy")
+                pt_events = [ev for ev in events_list
+                             if p["start_frame"] <= ev.frame_idx <= p["end_frame"]]
+                points_list.append(TennisPoint(
+                    point_idx=p["point_idx"],
+                    start_frame=p["start_frame"],
+                    end_frame=p["end_frame"],
+                    start_sec=p["start_sec"],
+                    end_sec=p["end_sec"],
+                    serve_frame=p.get("serve_frame"),
+                    serve_player=p.get("serve_player"),
+                    first_bounce_frame=p.get("first_bounce_frame"),
+                    first_bounce_court_xy=tuple(fb_xy) if fb_xy else None,
+                    serve_zone=p.get("serve_zone"),
+                    serve_fault_type=p.get("serve_fault_type"),
+                    end_reason=p.get("end_reason", "BALL_LOST"),
+                    rally_hit_count=p.get("rally_hit_count", 0),
+                    bounce_count=p.get("bounce_count", 0),
+                    bounce_frames=p.get("bounce_frames", []),
+                    events=pt_events,
+                    confidence=p.get("confidence", 0.5),
+                ))
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logger.warning(f"Failed to parse points.json: {e}")
+
+    # Phase 1: Contact detection from ball physics
+    # Uses EMA-smoothed trajectory with angle reversal, speed gating, and cooldown.
+    from tennisiq.analytics.shots import detect_contacts
+    shot_events = detect_contacts(
+        ball_physics=ball_physics,
+        player_results=player_results,
+        fps=fps,
+        start_sec=0.0,
+    )
+    logger.info(f"Post-merge contact detection: {len(shot_events)} contacts")
+
+    # Phase 2: Trajectory-based shot type classification
+    from tennisiq.analytics.shot_classifier import classify_shot_type
+
+    shot_directions: dict[int, str] = {}
+    for i, shot in enumerate(shot_events):
+        result = classify_shot_type(shot, i, shot_events, ball_physics)
+        shot.shot_type = result.shot_type
+        shot.shot_type_confidence = result.confidence
+        shot_directions[shot.frame_idx] = classify_shot_direction(
+            shot, shot.court_side or "near"
+        )
+    type_counts: dict[str, int] = {}
+    for s in shot_events:
+        type_counts[s.shot_type] = type_counts.get(s.shot_type, 0) + 1
+    logger.info(f"Post-merge shot classification: {type_counts}")
+
+    # Phase 3: Match analytics
+    analytics = compute_match_analytics(
+        shot_events=shot_events,
+        shot_directions=shot_directions,
+        points=points_list,
+        events=events_list,
+        ball_physics=ball_physics,
+        player_results=player_results,
+        fps=fps,
+    )
+
+    # Phase 4: Coaching intelligence
+    coaching = generate_coaching_intelligence(
+        analytics, points_list, shot_events, shot_directions
+    )
+
+    logger.info(f"Post-merge analytics complete: {analytics.total_shots} shots, "
+                f"{analytics.total_points} points")
+
+    # Write output files
+    shots_data = []
+    for s in shot_events:
+        shots_data.append({
+            "frame_idx": s.frame_idx,
+            "timestamp_sec": s.timestamp_sec,
+            "owner": s.owner,
+            "ball_court_xy": list(s.ball_court_xy),
+            "shot_type": s.shot_type,
+            "shot_type_confidence": s.shot_type_confidence,
+            "ball_direction_deg": s.ball_direction_deg,
+            "ball_direction_label": shot_directions.get(s.frame_idx, "unknown"),
+            "speed_m_s": s.speed_m_s,
+            "court_side": s.court_side,
+            "ownership_method": s.ownership_method,
+        })
+    _write_json(out_dir / "shots.json", shots_data)
+
+    analytics_dict = analytics_to_dict(analytics)
+    _write_json(out_dir / "analytics.json", analytics_dict)
+
+    coaching_dict = coaching_to_dict(coaching)
+
+    player_a_card = {
+        "card": coaching_dict.get("player_a_card", {}),
+        "weaknesses": coaching_dict.get("player_a_weaknesses", {}),
+    }
+    _write_json(out_dir / "player_a_card.json", player_a_card)
+
+    player_b_card = {
+        "card": coaching_dict.get("player_b_card", {}),
+        "weaknesses": coaching_dict.get("player_b_weaknesses", {}),
+    }
+    _write_json(out_dir / "player_b_card.json", player_b_card)
+
+    match_flow = {
+        "insights": coaching_dict.get("match_flow_insights", []),
+    }
+    _write_json(out_dir / "match_flow.json", match_flow)
+
+    # Also update coaching cards with enhanced data if available
+    enhanced_cards = coaching_dict.get("coaching_cards", [])
+    if enhanced_cards:
+        _write_json(out_dir / "coaching_cards.json", enhanced_cards)
+
+    logger.info(f"Post-merge analytics files written to {out_dir}")
+
+
 # ── Main pipeline orchestrator ────────────────────────────────────────────────
 
 def _run_pipeline(
@@ -427,6 +732,32 @@ def _run_pipeline(
             _post_status(backend_url, job_id=job_id, stage="generating_outputs",
                          description="Merging segment results...", status="running")
             accum.write_merged(fps, duration, n_segments, succeeded)
+
+            # Post-merge fallback recomputation:
+            # Recompute only when merged analytics are missing/empty.
+            # This preserves up-to-date Modal analytics (including pose-based
+            # shot labels) while still fixing stale/older cloud outputs.
+            analytics_ok = False
+            analytics_path = out_dir / "analytics.json"
+            if analytics_path.exists():
+                try:
+                    merged_analytics = json.loads(analytics_path.read_text(encoding="utf-8"))
+                    total_shots = int(merged_analytics.get("total_shots", 0) or 0)
+                    total_points = int(merged_analytics.get("total_points", 0) or 0)
+                    analytics_ok = total_shots > 0 and total_points > 0
+                except Exception:
+                    analytics_ok = False
+
+            if not analytics_ok:
+                _post_status(backend_url, job_id=job_id, stage="match_analytics",
+                             description="Computing match analytics & coaching intelligence...",
+                             status="running")
+                try:
+                    _compute_post_merge_analytics(out_dir, fps)
+                except Exception as e:
+                    logger.error(f"Post-merge analytics failed: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
 
         # Copy raw video into outputs for the results page
         if footage_url.startswith("file://"):

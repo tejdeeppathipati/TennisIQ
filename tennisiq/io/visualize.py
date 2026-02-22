@@ -45,6 +45,18 @@ CYAN = (255, 255, 0)
 MAGENTA = (255, 0, 255)
 ORANGE = (0, 165, 255)
 
+# COCO-17 skeleton connections for YOLOv8 pose.
+POSE_PAIRS = [
+    (5, 7), (7, 9),      # left arm
+    (6, 8), (8, 10),     # right arm
+    (5, 6),              # shoulders
+    (5, 11), (6, 12),    # torso upper
+    (11, 12),            # hips
+    (11, 13), (13, 15),  # left leg
+    (12, 14), (14, 16),  # right leg
+]
+POSE_COLORS = [CYAN, MAGENTA, YELLOW]
+
 
 def _draw_label(frame, text, x, y, color, bg_color=None):
     """Draw a YOLO-style label with background above a bounding box."""
@@ -84,6 +96,31 @@ def _draw_keypoint_lines(frame, keypoints):
             kx2, ky2 = keypoints[j]
             if kx1 is not None and kx2 is not None:
                 cv2.line(frame, (int(kx1), int(ky1)), (int(kx2), int(ky2)), RED, 2, cv2.LINE_AA)
+
+
+def _draw_pose_skeleton(
+    frame: np.ndarray,
+    keypoints_xy: list[tuple[float, float] | None],
+    color_offset: int = 0,
+):
+    """Draw YOLOv8 pose skeleton in the neon style used by demo references."""
+    if not keypoints_xy:
+        return
+
+    for pair_idx, (i, j) in enumerate(POSE_PAIRS):
+        if i >= len(keypoints_xy) or j >= len(keypoints_xy):
+            continue
+        p1 = keypoints_xy[i]
+        p2 = keypoints_xy[j]
+        if p1 is None or p2 is None:
+            continue
+        c = POSE_COLORS[(pair_idx + color_offset) % len(POSE_COLORS)]
+        cv2.line(frame, (int(p1[0]), int(p1[1])), (int(p2[0]), int(p2[1])), c, 3, cv2.LINE_AA)
+
+    for p in keypoints_xy:
+        if p is None:
+            continue
+        cv2.circle(frame, (int(p[0]), int(p[1])), 3, GREEN, -1, cv2.LINE_AA)
 
 
 BALL_TRAIL_LENGTH = 10
@@ -204,6 +241,7 @@ def render_overlay_video(
     end_sec: float | None = None,
     ball_detections_yolo: list | None = None,
     events: list | None = None,
+    draw_pose: bool = False,
     progress_callback=None,
 ) -> str:
     """
@@ -238,6 +276,17 @@ def render_overlay_video(
 
     trail: list[tuple] = []
 
+    pose_model = None
+    if draw_pose:
+        try:
+            from ultralytics import YOLO
+
+            pose_model = YOLO("yolov8n-pose.pt")
+            logger.info("Pose overlay enabled: YOLOv8n-pose loaded")
+        except Exception as e:
+            logger.warning(f"Pose overlay disabled (pose model unavailable): {e}")
+            pose_model = None
+
     for i in range(n_frames):
         ret, frame = cap.read()
         if not ret:
@@ -258,9 +307,12 @@ def render_overlay_video(
         if ball_detections_yolo is not None and i < len(ball_detections_yolo):
             det = ball_detections_yolo[i]
             if det is not None:
-                ball_xy = det.center_xy
-                ball_bbox = det.bbox
-                ball_conf = det.confidence
+                if hasattr(det, "center_xy"):
+                    ball_xy = det.center_xy
+                    ball_bbox = det.bbox
+                    ball_conf = det.confidence
+                elif isinstance(det, (list, tuple)) and len(det) >= 2 and det[0] is not None:
+                    ball_xy = (det[0], det[1])
         elif i < len(ball_positions):
             bp = ball_positions[i]
             if hasattr(bp, "pixel_xy"):
@@ -279,6 +331,40 @@ def render_overlay_video(
         # Player A / B from frame results
         pa = player_results[i].player_a if i < len(player_results) else None
         pb = player_results[i].player_b if i < len(player_results) else None
+
+        # Optional pose inference + drawing on player crops.
+        if pose_model is not None:
+            for det_idx, det in enumerate([pa, pb]):
+                if det is None:
+                    continue
+                x1, y1, x2, y2 = [int(v) for v in det.bbox]
+                x1 = max(0, min(x1, w - 1))
+                y1 = max(0, min(y1, h - 1))
+                x2 = max(0, min(x2, w))
+                y2 = max(0, min(y2, h))
+                if x2 <= x1 + 2 or y2 <= y1 + 2:
+                    continue
+                crop = frame[y1:y2, x1:x2]
+                if crop.size == 0:
+                    continue
+                try:
+                    r = pose_model(crop, verbose=False)
+                    if r is not None and len(r) > 0 and r[0].keypoints is not None and len(r[0].keypoints.xy) > 0:
+                        xy = r[0].keypoints.xy[0].cpu().numpy()
+                        conf = None
+                        if r[0].keypoints.conf is not None and len(r[0].keypoints.conf) > 0:
+                            conf = r[0].keypoints.conf[0].cpu().numpy()
+
+                        global_kps: list[tuple[float, float] | None] = []
+                        for k_idx, (kx, ky) in enumerate(xy):
+                            if conf is not None and k_idx < len(conf) and float(conf[k_idx]) < 0.35:
+                                global_kps.append(None)
+                            else:
+                                global_kps.append((float(kx + x1), float(ky + y1)))
+                        _draw_pose_skeleton(frame, global_kps, color_offset=det_idx)
+                except Exception:
+                    # Never break overlay rendering due to pose inference failures.
+                    pass
 
         annotated = draw_overlay(
             frame,

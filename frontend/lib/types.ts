@@ -113,11 +113,126 @@ export interface CoachingCard {
   start_sec: number;
   end_sec: number;
   rally_hit_count: number;
-  bounce_count: number;
+  bounce_count?: number;
   end_reason: string;
-  serve_zone: string | null;
-  serve_fault_type: string | null;
+  serve_zone?: string | null;
+  serve_fault_type?: string | null;
   confidence: number;
+  shot_sequence?: ShotSequenceItem[];
+  pattern_context?: string;
+}
+
+export interface ShotSequenceItem {
+  owner: string;
+  owner_short: string;
+  shot_type: string;
+  direction: string;
+  speed_m_s: number | null;
+  court_side: string | null;
+}
+
+export interface ShotEvent {
+  frame_idx: number;
+  timestamp_sec: number;
+  owner: string;
+  ball_court_xy: [number, number];
+  shot_type: string | null;
+  shot_type_confidence: number;
+  ball_direction_deg: number | null;
+  ball_direction_label: string;
+  speed_m_s: number | null;
+  court_side: string | null;
+  ownership_method: string;
+}
+
+export interface PlayerCard {
+  card: {
+    label: string;
+    exploit_plan?: string;
+    tendencies: string[];
+    serve_summary: string;
+    shot_distribution_summary: string;
+    coverage_summary: string;
+  };
+  weaknesses: {
+    label: string;
+    weaknesses: WeaknessItem[];
+  };
+}
+
+export interface WeaknessItem {
+  description: string;
+  data_point: string;
+  points_cost: number;
+  severity: number;
+}
+
+export interface MatchFlowData {
+  insights: MatchFlowInsight[];
+}
+
+export interface MatchFlowInsight {
+  description: string;
+  timestamp_range: [number, number] | null;
+}
+
+export interface AnalyticsData {
+  player_a: PlayerAnalytics;
+  player_b: PlayerAnalytics;
+  rally_length_distribution: Record<string, number>;
+  rally_length_avg: number;
+  total_points: number;
+  total_shots: number;
+  momentum_data: MomentumPoint[];
+  match_flow: MatchFlowPoint[];
+  shot_pattern_dominance: Record<string, PatternItem[]>;
+}
+
+export interface PlayerAnalytics {
+  label: string;
+  total_shots: number;
+  shot_type_counts: Record<string, number>;
+  shot_type_pcts: Record<string, number>;
+  shot_direction_counts: Record<string, Record<string, number>>;
+  shot_direction_pcts: Record<string, Record<string, number>>;
+  error_by_shot_type: Record<string, number>;
+  error_rate_by_shot_type: Record<string, number>;
+  error_by_rally_length: Record<string, number>;
+  error_rate_by_rally_length: Record<string, number>;
+  avg_shot_speed_m_s: number;
+  total_distance_covered: number;
+  center_of_gravity: [number, number];
+  first_serve_pct: number;
+  double_fault_count: number;
+  serve_zone_win_rate: Record<string, number>;
+  serve_placement_counts: Record<string, number>;
+  points_won: number;
+  points_lost: number;
+}
+
+export interface MomentumPoint {
+  point_idx: number;
+  timestamp_sec: number;
+  winner: string;
+  a_momentum: number;
+  b_momentum: number;
+  rally_length: number;
+}
+
+export interface MatchFlowPoint {
+  point_idx: number;
+  timestamp_sec: number;
+  rally_length: number;
+  end_reason: string;
+  duration_sec: number;
+}
+
+export interface PatternItem {
+  pattern: string;
+  shot_type: string;
+  direction: string;
+  count: number;
+  pct: number;
 }
 
 export interface ServePlacement {
@@ -164,6 +279,11 @@ export interface ResultsDataResponse {
   clips: { filename: string; url: string }[];
   downloads: DownloadItem[];
   point_feedback: PointFeedbackEntry[];
+  shots: ShotEvent[];
+  analytics: AnalyticsData | null;
+  player_a_card: PlayerCard | null;
+  player_b_card: PlayerCard | null;
+  match_flow: MatchFlowData | null;
 }
 
 export interface Session {
@@ -194,7 +314,10 @@ export const STAGE_LABELS: Record<string, string> = {
   ball_physics: "Ball Physics",
   player_detection: "Player Detection",
   event_detection: "Detecting Events",
+  shot_detection: "Detecting Shots & Ownership",
+  shot_classification: "Classifying Shot Types",
   point_segmentation: "Segmenting Points",
+  match_analytics: "Computing Match Analytics",
   generating_outputs: "Generating Outputs",
   overlay_video: "Rendering Overlay",
   clip_extraction: "Extracting Clips",
@@ -215,7 +338,10 @@ export const STAGE_ORDER = [
   "ball_physics",
   "player_detection",
   "event_detection",
+  "shot_detection",
+  "shot_classification",
   "point_segmentation",
+  "match_analytics",
   "generating_outputs",
   "overlay_video",
   "clip_extraction",

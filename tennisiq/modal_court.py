@@ -36,17 +36,20 @@ def run_court_and_ball(
     court_batch_size: int = 32,
 ) -> dict:
     """
-    Full TennisIQ inference pipeline on GPU.
+    Full TennisIQ inference + analytics pipeline on GPU.
 
-    Phase 1: ResNet50 court keypoint regression → 14 keypoints per frame
-    Phase 2: Homography computation + confidence scoring
-    Phase 3: YOLOv5 tennis ball detection per frame
-    Phase 4: Court-space projection + speed/acceleration
-    Phase 5: YOLOv8n + ByteTrack → player detection, court filter, A/B assignment
-    Phase 6: Event detection — bounces + hits with in/out classification
-    Phase 6b: Point segmentation
-    Phase 7: Structured output files + coaching cards + visual data (FR-36/37/38/40)
-    Phase 8: Overlay video (FR-35) + per-point clips (FR-39)
+    Phase 1:  ResNet50 court keypoint regression → 14 keypoints per frame
+    Phase 2:  Homography computation + confidence scoring
+    Phase 3:  TrackNetV3 ball detection per frame
+    Phase 4:  Court-space projection + speed/acceleration
+    Phase 5:  YOLOv8n + ByteTrack → player detection, court filter, A/B assignment
+    Phase 6:  Shot detection via ball velocity reversal + ownership assignment
+    Phase 6b: Pose-first shot type classification (YOLOv8-pose + fallback)
+    Phase 6c: Event detection — bounces + hits with in/out classification
+    Phase 6d: Point segmentation
+    Phase 7:  Match analytics + coaching intelligence
+    Phase 8:  Structured output files
+    Phase 9:  Overlay video (FR-35) + per-point clips (FR-39)
     """
     import os
     import sys
@@ -58,11 +61,14 @@ def run_court_and_ball(
     import torch
 
     from tennisiq.cv.court.inference_resnet import CourtDetectorResNet
-    from tennisiq.cv.ball.inference_yolo5 import BallDetectorYOLO
+    from tennisiq.cv.ball.inference_tracknet import BallDetectorTrackNet
     from tennisiq.cv.ball.inference import compute_ball_physics, clean_ball_track
     from tennisiq.cv.players.inference import PlayerDetector
     from tennisiq.geometry.homography import compute_homographies
     from tennisiq.analytics.events import detect_events
+    from tennisiq.analytics.shots import detect_shots, classify_shot_direction
+    from tennisiq.analytics.shot_classifier import classify_shot_type
+    from tennisiq.analytics.shot_classifier_pose import classify_shot_from_pose
     from tennisiq.analytics.points import segment_points
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -101,9 +107,9 @@ def run_court_and_ball(
     t_hom = time.time() - t1
     print(f"  Homography: {t_hom:.2f}s")
 
-    # ── Phase 3: Ball detection (YOLOv5) ─────────────────────────────────
-    ball_det = BallDetectorYOLO(
-        os.path.join(ckpt_root, "ball_yolo5", "yolo5_last.pt"), device=device,
+    # ── Phase 3: Ball detection (TrackNetV3) ──────────────────────────────
+    ball_det = BallDetectorTrackNet(
+        os.path.join(ckpt_root, "ball_tracknet", "model_best.pt"), device=device,
     )
 
     t2 = time.time()
@@ -111,7 +117,7 @@ def run_court_and_ball(
     def ball_progress(done, total):
         elapsed = time.time() - t2
         rate = done / elapsed if elapsed > 0 else 0
-        print(f"  [ball-yolo5] {done}/{total} frames ({rate:.0f} fps)")
+        print(f"  [tracknetv3] {done}/{total} frames ({rate:.0f} fps)")
 
     ball_track_raw, ball_detections_raw = ball_det.detect_video(
         tmp_path, start_sec=start_sec, end_sec=end_sec,
@@ -119,7 +125,7 @@ def run_court_and_ball(
     )
     t_ball = time.time() - t2
     raw_det = sum(1 for x, y in ball_track_raw if x is not None)
-    print(f"  Ball detection (YOLOv5): {len(ball_track_raw)} frames in {t_ball:.1f}s")
+    print(f"  Ball detection (TrackNetV3): {len(ball_track_raw)} frames in {t_ball:.1f}s")
     print(f"    Raw detections: {raw_det}/{len(ball_track_raw)}")
 
     # ── Phase 3b: Ball track cleaning (outlier removal + interpolation) ──
@@ -152,7 +158,64 @@ def run_court_and_ball(
     t_players = time.time() - t4
     print(f"  Player detection: {len(player_results)} frames in {t_players:.1f}s")
 
-    # ── Phase 6: Event detection (bounces + hits) ─────────────────────────
+    # ── Phase 6: Shot detection via velocity reversal + ownership ─────────
+    t_shots_start = time.time()
+    shot_events = detect_shots(
+        ball_physics=ball_physics,
+        player_results=player_results,
+        fps=fps,
+        start_sec=start_sec,
+    )
+    t_shots = time.time() - t_shots_start
+    n_a = sum(1 for s in shot_events if s.owner == "player_a")
+    n_b = sum(1 for s in shot_events if s.owner == "player_b")
+    print(f"  Shot detection: {len(shot_events)} shots (A={n_a}, B={n_b}) in {t_shots:.3f}s")
+
+    # ── Phase 6b: Pose-first shot type classification ─────────────────────
+    t_class_start = time.time()
+    shot_directions = {}
+    cap_cls = cv2.VideoCapture(tmp_path)
+    frame_cache: dict[int, np.ndarray] = {}
+
+    for i, shot in enumerate(shot_events):
+        pose_result = None
+        fi = int(shot.frame_idx)
+        if 0 <= fi < len(player_results):
+            pr = player_results[fi]
+            player_det = pr.player_a if shot.owner == "player_a" else pr.player_b
+            if player_det is not None:
+                if fi in frame_cache:
+                    frame = frame_cache[fi]
+                else:
+                    cap_cls.set(cv2.CAP_PROP_POS_FRAMES, fi)
+                    ok, frame = cap_cls.read()
+                    if ok and frame is not None:
+                        frame_cache[fi] = frame
+                    else:
+                        frame = None
+                if frame is not None:
+                    pose_result = classify_shot_from_pose(frame, player_det.bbox)
+
+        if pose_result is not None and pose_result.confidence >= 0.6 and pose_result.shot_type != "neutral":
+            shot.shot_type = pose_result.shot_type
+            shot.shot_type_confidence = pose_result.confidence
+        else:
+            # Fallback to trajectory classifier when pose is low-confidence.
+            result = classify_shot_type(shot, i, shot_events, ball_physics)
+            shot.shot_type = result.shot_type
+            shot.shot_type_confidence = result.confidence
+
+        shot_directions[shot.frame_idx] = classify_shot_direction(shot, shot.court_side or "near")
+
+    cap_cls.release()
+
+    t_class = time.time() - t_class_start
+    type_counts = {}
+    for s in shot_events:
+        type_counts[s.shot_type] = type_counts.get(s.shot_type, 0) + 1
+    print(f"  Shot classification: {type_counts} in {t_class:.3f}s")
+
+    # ── Phase 6c: Event detection (bounces + hits) ────────────────────────
     t5_events = time.time()
     events = detect_events(
         ball_physics=ball_physics,
@@ -165,7 +228,7 @@ def run_court_and_ball(
     n_hits = sum(1 for e in events if e.event_type == "hit")
     print(f"  Event detection: {len(events)} events ({n_bounces} bounces, {n_hits} hits) in {t_events:.2f}s")
 
-    # ── Phase 6b: Point segmentation ─────────────────────────────────────
+    # ── Phase 6d: Point segmentation ──────────────────────────────────────
     t6_points = time.time()
     points = segment_points(
         events=events,
@@ -181,10 +244,28 @@ def run_court_and_ball(
               f"{pt.rally_hit_count} hits, {pt.bounce_count} bounces, "
               f"end={pt.end_reason}, serve_zone={pt.serve_zone}")
 
+    # ── Phase 7: Match analytics + coaching intelligence ──────────────────
+    from tennisiq.analytics.match_analytics import compute_match_analytics
+    from tennisiq.analytics.coaching_intelligence import generate_coaching_intelligence
+
+    t_analytics_start = time.time()
+    analytics = compute_match_analytics(
+        shot_events=shot_events,
+        shot_directions=shot_directions,
+        points=points,
+        events=events,
+        ball_physics=ball_physics,
+        player_results=player_results,
+        fps=fps,
+    )
+    coaching = generate_coaching_intelligence(analytics, points, shot_events, shot_directions)
+    t_analytics = time.time() - t_analytics_start
+    print(f"  Match analytics + coaching: {t_analytics:.3f}s")
+
     total_elapsed = time.time() - t0
     n = len(all_kps)
 
-    # ── Phase 7: Write structured outputs ────────────────────────────────
+    # ── Phase 8: Write structured outputs ─────────────────────────────────
     from tennisiq.io.output import write_outputs
 
     timing_data = {
@@ -193,8 +274,11 @@ def run_court_and_ball(
         "ball_sec": round(t_ball, 2),
         "physics_sec": round(t_phys, 3),
         "player_sec": round(t_players, 2),
+        "shots_sec": round(t_shots, 3),
+        "classification_sec": round(t_class, 3),
         "events_sec": round(t_events, 3),
         "points_sec": round(t_points, 3),
+        "analytics_sec": round(t_analytics, 3),
         "total": round(total_elapsed, 2),
     }
 
@@ -215,10 +299,14 @@ def run_court_and_ball(
         timing=timing_data,
         events=events,
         points=points,
+        shot_events=shot_events,
+        shot_directions=shot_directions,
+        analytics=analytics,
+        coaching=coaching,
     )
     print(f"  Structured outputs written to {out_dir}/{job_id}/")
 
-    # ── Phase 8: Render overlay video + extract point clips ─────────────
+    # ── Phase 9: Render overlay video + extract point clips ─────────────
     from tennisiq.io.visualize import render_overlay_video, extract_point_clips
 
     t5 = time.time()
@@ -239,6 +327,7 @@ def run_court_and_ball(
         end_sec=end_sec,
         ball_detections_yolo=ball_detections_raw,
         events=events,
+        draw_pose=False,
         progress_callback=overlay_progress,
     )
     t_overlay = time.time() - t5

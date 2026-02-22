@@ -60,7 +60,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
-BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8002")
+BACKEND_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 OUTPUTS_DIR = os.getenv("OUTPUTS_DIR", os.path.join(os.path.dirname(__file__), "..", "outputs"))
 DEFAULT_CONFIG = {
     "fps": 30,
@@ -599,6 +599,11 @@ async def get_results_data(job_id: str):
         "stats": None,
         "clips": [],
         "downloads": [],
+        "shots": [],
+        "analytics": None,
+        "player_a_card": None,
+        "player_b_card": None,
+        "match_flow": None,
     }
 
     def _load_json(relpath: str):
@@ -658,6 +663,18 @@ async def get_results_data(job_id: str):
     ball_heatmap = _load_json("visuals/ball_heatmap.json")
     if ball_heatmap:
         data["ball_heatmap"] = ball_heatmap
+
+    # ── New analytics data ────────────────────────────────────────────────
+    data["shots"] = _load_json("shots.json") or []
+    data["analytics"] = _load_json("analytics.json")
+    data["player_a_card"] = _load_json("player_a_card.json")
+    data["player_b_card"] = _load_json("player_b_card.json")
+    data["match_flow"] = _load_json("match_flow.json")
+
+    if data["analytics"]:
+        data["downloads"].append({"label": "Analytics JSON", "href": f"{api_base}/analytics.json"})
+    if data["shots"]:
+        data["downloads"].append({"label": "Shots JSON", "href": f"{api_base}/shots.json"})
 
     clips_dir = run_dir / "clips"
     if clips_dir.is_dir():
