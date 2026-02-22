@@ -1,0 +1,10 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+python-multipart==0.0.20
+python-dotenv==1.0.1
+modal==0.73.39
+anthropic==0.40.0
+requests==2.32.3
+scipy==1.14.1
+numpy>=1.26.0
+opencv-python-headless>=4.10.0
